@@ -1,0 +1,34 @@
+{
+  "api": {
+    "context_mode": "delta",
+    "base_url": "https://api.openai.com/v1",
+    "model": "YOUR_VISION_MODEL",
+    "api_key_env": "OPENAI_API_KEY",
+    "api_key": "",
+    "timeout_seconds": 180,
+    "image_detail": "high",
+    "max_nodes": 2000,
+    "max_image_mb": 20,
+    "request_options": {}
+  },
+  "concurrency": 1,
+  "max_operations": 500,
+  "rules": {
+    "layer1_max_area_ratio": 0.6,
+    "clipped_fragment_enabled": true,
+    "clipped_min_visible_ratio": 0.1,
+    "clipped_strip_max_px": 8,
+    "layout_enabled": true,
+    "layout_split_depth": 2,
+    "layout_min_gap": 24,
+    "layout_gap_ratio": 0.025,
+    "layout_min_extent_ratio": 0.06,
+    "parent_size_tolerance": 0.02,
+    "sibling_iou": 0.9,
+    "fragment_max_size": 36
+  },
+  "grouping": {
+    "max_candidates": 64,
+    "group_max_gap_px": 48
+  }
+}

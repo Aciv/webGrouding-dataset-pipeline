@@ -1,0 +1,17 @@
+{
+  "name": "responsive-ui-dom-dataset",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json && node scripts/copy-web-assets.mjs",
+    "collect": "npm run build --silent && node dist/cli.js collect",
+    "review": "npm run build --silent && node dist/cli.js review",
+    "audit": "npm run build --silent && node dist/cli.js audit",
+    "boxes": "npm run build --silent && node dist/cli.js boxes",
+    "layers": "npm run build --silent && node dist/cli.js layers",
+    "test": "npm run build --silent && node dist/tests/dom-cache.js && node dist/tests/browser-lifecycle.js && node dist/tests/visibility.js && node dist/tests/structure.js && node dist/tests/hierarchy.js && node dist/tests/hierarchy-geometry.js && node dist/tests/audit.js && node dist/tests/integration.js && node dist/tests/review.js && node dist/tests/discovery.js && node dist/tests/initial.js && node dist/tests/popups.js"
+  },
+  "dependencies": { "playwright": "1.63.0" },
+  "devDependencies": { "@types/node": "^22.0.0", "typescript": "^5.0.0" }
+}

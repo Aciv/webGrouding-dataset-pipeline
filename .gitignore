@@ -1,0 +1,13 @@
+node_modules/
+__pycache__/
+*.pyc
+dist/
+runs/
+exports/
+examples/
+!example/pilot-20.json
+*.log
+.env
+.env.*
+!.env.example
+docs/
