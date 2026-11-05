@@ -214,14 +214,36 @@ class Client:
         request = urllib.request.Request(self.url, data=json.dumps(payload).encode(),
             headers={"Authorization": "Bearer "+self.key, "Content-Type": "application/json"})
         start = time.monotonic()
-        try:
-            with urllib.request.urlopen(request, timeout=self.config.get("timeout_seconds", 180)) as response:
-                raw = json.load(response)
-        except urllib.error.HTTPError as error:
-            # Do not persist provider bodies, which can echo credentials or the image request.
-            raise RuntimeError(f"VLM HTTP {error.code}") from None
+        retries = self.config.get("max_retries", 3)
+        if type(retries) is not int or not 0 <= retries <= 10:
+            raise ValueError("max_retries must be an integer in 0..10")
+        attempt = 0
+        while True:
+            try:
+                with urllib.request.urlopen(request, timeout=self.config.get("timeout_seconds", 180)) as response:
+                    raw = json.load(response)
+                break
+            except urllib.error.HTTPError as error:
+                if error.code in (429, 500, 502, 503, 504) and attempt < retries:
+                    header = error.headers.get("Retry-After") if error.headers else None
+                    try:
+                        delay = max(0.0, float(header))
+                    except (TypeError, ValueError):
+                        delay = min(30.0, float(2 ** (attempt + 1)))
+                    time.sleep(delay)
+                    attempt += 1
+                    continue
+                # Do not persist provider bodies, which can echo credentials or the image request.
+                raise RuntimeError(f"VLM HTTP {error.code}") from None
+            except (urllib.error.URLError, TimeoutError, ConnectionError):
+                if attempt < retries:
+                    time.sleep(min(30.0, float(2 ** (attempt + 1))))
+                    attempt += 1
+                    continue
+                raise RuntimeError("VLM network error after retries") from None
         text_chars = sum(len(m["content"]) if isinstance(m["content"], str) else sum(len(c.get("text", "")) for c in m["content"]) for m in messages if m["role"] != "system")
         timing = {"seconds": round(time.monotonic()-start, 3), "usage": raw.get("usage"),
+            "retries": attempt,
             "model": raw.get("model", self.config["model"]),
             "prompt_chars": text_chars, "image_bytes": len(data), "context_mode": self.context_mode,
             "context_schema": "original_registry_current_edges_delta_v3" if self.context_mode == "delta" else "legacy_full_v4",

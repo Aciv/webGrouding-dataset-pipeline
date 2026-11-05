@@ -2,6 +2,7 @@
 from collections import Counter
 from rules import apply_operations, overlap, validate
 from layout import layout_operations
+from semantic_cleanup import generic_wrapper
 from frontier import bottom_up_operations, clipped_fragment_operations, large_region_requirements
 
 
@@ -86,10 +87,15 @@ def normalize(tree, policy):
                 while key is not None:
                     ancestors.add(key)
                     key = nodes[key]["parent_id"]
-            candidates = [nodes[key] for key in ancestors if nodes[key]["struct"] == "block" and len(children[key]) == 1]
+            candidates = [nodes[key] for key in ancestors if nodes[key]["struct"] == "block" and len(children[key]) == 1 and
+                (not policy.get("preserve_meaningful_deep", False) or generic_wrapper(nodes[key]))]
             if candidates:
                 chosen = sorted(candidates, key=lambda n: (-depths[n["node_id"]], n["node_id"]))[0]
                 operation = {"op": "contract", "node": chosen["node_id"], "reason": "rule_unary_wrapper_for_depth_budget"}
+            elif policy.get("preserve_meaningful_deep", False):
+                # New semantic pipeline preserves unresolved primary content for review.
+                # Top-down cleanup has already omitted only explicitly low-value tiny leaves.
+                break
             else:
                 # Four-stage annotation intentionally omits details represented by a retained ancestor.
                 # Remove deepest leaves first, never delete a branch together with useful descendants.
@@ -98,7 +104,7 @@ def normalize(tree, policy):
         if operation is None:
             break
         apply(operation)
-    validate(result, 4)
+    validate(result, None if policy.get("preserve_meaningful_deep", False) else 4)
     summary = {"before": len(tree["nodes"]), "after": len(result["nodes"]),
         "before_levels": max(validate(tree).values(), default=-1)+1,
         "after_levels": max(validate(result).values(), default=-1)+1,

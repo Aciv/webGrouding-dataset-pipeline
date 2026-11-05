@@ -1,8 +1,10 @@
 # Hugging Face 分块压缩与 URL 索引
 
-独立于采集的后处理：读取一个或多个采集 run 里已经发布的页面（`full.png`/`initial.png` + `hierarchy.json`），先把同一网页的所有分辨率归为一个逻辑页面样本，再按来源 URL 可选去重，最后按约 1 GiB 切成压缩分块并生成逐页面 `metadata.jsonl`。三分辨率（mobile/desktop/tablet）始终在同一个分块、同一行索引中，分块边界只出现在页面之间；**但包内成员保留原始相对路径、原文件名和原 hierarchy 字节，解压后恢复原来的文件树形状**。JSONL 每行包含零基 `index`、实际来源网页 `source_url`、入口 URL、分类、各视口尺寸、分块与成员路径、SHA-256。仅使用 Python 标准库，不打开浏览器、不重新编码 PNG、不改采集源文件，也不自动上传。
+独立于采集的后处理：读取一个或多个采集 run 里已经发布的页面（`full.png`/`initial.png` + `hierarchy.json`），先把同一网页的所有分辨率归为一个逻辑页面样本，再按来源 URL 可选去重，最后按约 1 GiB 切成压缩分块并生成逐页面 `metadata.jsonl`。三分辨率（mobile/desktop/tablet）始终在同一个分块、同一行索引中，分块边界只出现在页面之间；**但包内成员保留原始相对路径、原文件名和 hierarchy 字节（默认原版，索引模式可用派生 clean 版），解压后恢复原来的文件树形状**。JSONL 每行包含零基 `index`、实际来源网页 `source_url`、入口 URL、分类、各视口尺寸、分块与成员路径、SHA-256。仅使用 Python 标准库，不打开浏览器、不重新编码 PNG、不改采集源文件，也不自动上传。
 
 与 [WebDataset 打包](../webdataset/README.md) 的区别：那份脚本按单张截图输出未压缩 `.tar`，面向上传后的 Hub WebDataset 浏览/流式加载；本脚本按页面合并三分辨率，输出 gzip 压缩分块和逐页面索引，面向大体积数据的上传、下载和自定义训练读取。包内是按页面组织的 TAR，不是按同名 key 配对的 WebDataset 样本布局；需要 Hub 侧标准 WebDataset 时继续使用 `scripts/webdataset`。
+
+索引模式：`--index runs/pipe/index-final.json`（与 `--input` 互斥）按 [索引式离线 Pipeline](../pipeline/README.md) 打包。截图从索引的 `runs[].root` 读取，hierarchy 可以是原版或 postprocess 派生的 clean 版本，URL/分类直接来自索引；成员路径仍保持原始目录树。`metadata.jsonl` 额外记录 `hierarchy_source`、`derived_hierarchy_path` 和 hierarchy SHA-256，`manifest.json` 记录索引路径、SHA-256 与阶段。索引模式支持 `--resume`：索引 SHA-256、chunk size、seed、dedupe、worker 数和 URL 要求一致时复用已完成的包；否则需要新的输出目录。运行过程输出 `pack_progress` JSON 行（已写页数、分块数、耗时）。`--workers N` 会启动 N 个并行 shard writer；N>1 时分片名为 `train-NN-xxxxx.tar.gz`，页仍然是分片内原子单位，`metadata.jsonl` 照常指向每个成员。
 
 ## 打包
 

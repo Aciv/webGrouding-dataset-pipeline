@@ -6,6 +6,8 @@ Curlie 按成功页数持续采集：见 [调度器说明](scripts/curlie/README
 
 Hugging Face 中转与预览格式：见 [WebDataset 打包](scripts/webdataset/README.md)。独立脚本将图片和 hierarchy 打成 TAR 分片，并附上网页 URL、入口、分类、分辨率与 HF 数据卡，不修改采集结果。需要按约 1 GiB 分块压缩、一个网页的三个分辨率保持同块、解压后恢复原始目录结构、合并多个 run 并按来源 URL 去重、并生成含索引与源 URL 的 `metadata.jsonl` 时，见 [HF 分块压缩](scripts/hf_chunks/README.md)。
 
+需要把离线流程串成 **filter → postprocess → final filter → chunks**，并让原始目录保持只读、URL/截图始终来自原目录、后处理只新增一版 hierarchy 时，见 [索引式离线 Pipeline](scripts/pipeline/README.md)。
+
 2,000 站初训候选已配置为三分辨率首屏、每站 2–3 页、网站并发 12，分成 20 批：见 [批量采集与迁移指令](docs/RANKED_2000_COLLECTION.md)。候选与配置生成不代表采集成功或标签已审核。
 
 从现有 View 系列迁移的独立采集骨架。采集首屏图、限高整页图、密集 DOM 几何和叠框预览，**没有冻结训练标签、生成 COCO、训练模型或推断跨视口功能等价**。

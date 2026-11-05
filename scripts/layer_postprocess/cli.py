@@ -2,18 +2,25 @@
 """Independent offline layer normalization; writes derived PNG/JSON pairs and audit reports."""
 import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import faulthandler
 import json
 from pathlib import Path
 import shutil
+import signal
 import time
 from grouping_vlm import Client
 from grouping_pipeline import process, PIPELINE_VERSION
 from storage import write
+from clean_export import export_clean
 
 
 
 def main():
     """Run bounded per-observation concurrency against an explicitly selected offline dataset."""
+    try:
+        faulthandler.register(signal.SIGUSR1)
+    except (AttributeError, ValueError, RuntimeError):
+        pass
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
@@ -21,8 +28,9 @@ def main():
     parser.add_argument("--dry-run", action="store_true", help="Only propose geometry edits; no API and no training output")
     parser.add_argument("--limit", type=int, default=0, help="0 means all observations")
     parser.add_argument("--reuse-edits", type=Path, help="Reuse a same-version grouping report without another API call")
-    parser.add_argument("--concurrency", type=int, help="Override sample concurrency from config (1..32)")
+    parser.add_argument("--concurrency", type=int, help="Override sample concurrency from config (1..256)")
     parser.add_argument("--resume", action="store_true", help="Skip structurally accepted outputs; retry failures using cached grouping decisions")
+    parser.add_argument("--export-to", type=Path, help="After successful processing, export only PNG + legacy hierarchy with true L1-L5 nodes")
     parser.add_argument("--select", action="append", default=[], help="Select observation directory relative to input; repeat for multiple samples")
     parser.add_argument("--context-mode", choices=("full", "delta"), help="Legacy compatibility option; grouping always sends original evidence and candidates once")
     args = parser.parse_args()
@@ -34,12 +42,20 @@ def main():
         parser.error("Output must be separate from the source tree")
     if output.exists() and any(output.iterdir()) and not args.resume:
         parser.error("Output must be empty; choose a new output")
+    if args.export_to:
+        clean = args.export_to.resolve()
+        if args.dry_run:
+            parser.error("Clean export requires actual processing, not --dry-run")
+        if any(clean == root or clean in root.parents or root in clean.parents for root in (source_root, output)):
+            parser.error("Clean export must be separate from source and processing output")
+        if clean.exists() and any(clean.iterdir()):
+            parser.error("Clean export output must be empty")
     config = json.loads(args.config.read_text())
     if args.context_mode:
         config.setdefault("api", {})["context_mode"] = args.context_mode
     concurrency = args.concurrency if args.concurrency is not None else config.get("concurrency", 1)
-    if type(concurrency) is not int or not 1 <= concurrency <= 32 or args.limit < 0:
-        parser.error("concurrency must be 1..32; limit must be nonnegative")
+    if type(concurrency) is not int or not 1 <= concurrency <= 256 or args.limit < 0:
+        parser.error("concurrency must be 1..256; limit must be nonnegative")
     if not args.dry_run:
         Client(config["api"])
     files = sorted(source.rglob("hierarchy.json")) if source.is_dir() else [source]
@@ -92,6 +108,8 @@ def main():
     write(output/"layer-postprocess-report.json", report)
     if report["status"] != "completed":
         raise SystemExit(1)
+    if args.export_to:
+        print(json.dumps({'type': 'clean_export', **export_clean(output, args.export_to)}, ensure_ascii=False), flush=True)
 
 
 if __name__ == "__main__":

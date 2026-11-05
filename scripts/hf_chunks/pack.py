@@ -16,11 +16,15 @@ import re
 import struct
 import sys
 import tarfile
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import parse_qsl, urlencode, urlsplit
 
 PROJECT = Path(__file__).resolve().parents[2]
-WEB = PROJECT / "scripts" / "webdataset"
-for _path in (PROJECT, WEB):
+SCRIPTS = PROJECT / "scripts"
+WEB = SCRIPTS / "webdataset"
+for _path in (PROJECT, SCRIPTS, WEB):
     if str(_path) not in sys.path:
         sys.path.insert(0, str(_path))
 from export_pages import find_pages
@@ -330,8 +334,8 @@ class ChunkWriter:
 
         A page is written as a unit, so even a chunk limit smaller than the page cannot
         separate its viewports. Extracting every shard restores the published tree:
-        each viewport keeps its original directory, PNG filename and untouched
-        hierarchy.json; no synthetic page.json is added inside the tree.
+        each viewport keeps its original member path; hierarchy bytes may come from
+        the pipeline's derived clean version. No synthetic page.json is added.
         """
         if not self.is_open:
             self._start()
@@ -362,13 +366,20 @@ class ChunkWriter:
         versions = set()
         for sample in page_samples:
             hierarchy_blob = sample["hierarchy_path"].read_bytes()
+            hierarchy_sha256 = hashlib.sha256(hierarchy_blob).hexdigest()
+            expected_hash = sample.get("hierarchy_sha256")
+            if expected_hash and hierarchy_sha256 != expected_hash:
+                raise ValueError(f"Hierarchy changed or mismatched: {sample['hierarchy_path']}")
             label = json.loads(hierarchy_blob.decode("utf-8"))
             rule_version = label.get("rule_version", "unversioned")
             versions.add(rule_version)
             viewport = sample["provenance"]["viewport"]
             prefix = sample.get("archive_prefix", "")
-            image_member = prefix + sample["image"].relative_to(sample["source"]).as_posix()
-            hierarchy_member = prefix + sample["hierarchy_path"].relative_to(sample["source"]).as_posix()
+            image_rel = sample.get("image_rel") or sample["image"].relative_to(sample["source"]).as_posix()
+            hierarchy_rel = (sample.get("hierarchy_rel")
+                             or sample["hierarchy_path"].relative_to(sample["source"]).as_posix())
+            image_member = prefix + image_rel
+            hierarchy_member = prefix + hierarchy_rel
             size = sample["image"].stat().st_size
             with HashingReader(sample["image"].open("rb")) as stream:
                 self._write_member(image_member, size, stream)
@@ -377,21 +388,25 @@ class ChunkWriter:
                 image_sha256 = stream.hash.hexdigest()
             self._write_member(hierarchy_member, len(hierarchy_blob), io.BytesIO(hierarchy_blob))
             capture = label.get("capture", {})
-            record["viewports"][viewport] = {
+            entry = {
                 "image_member": image_member,
                 "hierarchy_member": hierarchy_member,
                 "image_bytes": size,
                 "image_sha256": image_sha256,
                 "hierarchy_bytes": len(hierarchy_blob),
-                "hierarchy_sha256": hashlib.sha256(hierarchy_blob).hexdigest(),
+                "hierarchy_sha256": hierarchy_sha256,
                 "width": sample["width"],
                 "height": sample["height"],
                 "captured_at": capture.get("capturedAt"),
                 "annotation_rule_version": rule_version,
+                "hierarchy_source": sample.get("hierarchy_side", "original"),
                 "original_image_name": sample["image"].name,
-                "original_image_path": sample["image"].relative_to(sample["source"]).as_posix(),
-                "original_hierarchy_path": sample["hierarchy_path"].relative_to(sample["source"]).as_posix(),
+                "original_image_path": image_rel,
+                "original_hierarchy_path": hierarchy_rel,
             }
+            if sample.get("hierarchy_side") == "derived":
+                entry["derived_hierarchy_path"] = sample.get("derived_hierarchy_path")
+            record["viewports"][viewport] = entry
         record["annotation_rule_version"] = next(iter(versions)) if len(versions) == 1 else "mixed"
         self.count += 1
         return record
@@ -430,6 +445,14 @@ class ChunkWriter:
 
 def dataset_card(summary, curlie):
     """Write a data card that explains the page-grouped compressed shard layout."""
+    derived = summary.get("hierarchy_policy") == "derived_clean_hierarchy"
+    hierarchy_note = (
+        "Hierarchy members in this package are the pipeline's postprocessed clean "
+        "L1-L5 labels; image members remain the original screenshot bytes. Per-viewport "
+        "`hierarchy_source`, `derived_hierarchy_path`, rule version and SHA-256 record "
+        "the derived origin."
+        if derived else
+        "Hierarchy members in this package are the original published hierarchy bytes.")
     lines = [
         "---", "pretty_name: Responsive UI Structure (chunked)",
         "task_categories:", "  - object-detection",
@@ -470,6 +493,11 @@ def dataset_card(summary, curlie):
         "while this packer groups a page's viewports into one JSON index row. Read "
         "`metadata.jsonl`, or extract the shards and use the original hierarchy files.", "",
     ]
+    workers = summary.get("pack_workers", 1)
+    if workers > 1:
+        lines += [f"Shards were written by {workers} parallel workers; the worker id is part of "
+                  "each file name (`train-NN-xxxxx.tar.gz`). Pages remain atomic inside one shard, "
+                  "and `metadata.jsonl` still points to the exact member paths.", ""]
     lines += [
         "```python",
         "import json, tarfile",
@@ -482,10 +510,11 @@ def dataset_card(summary, curlie):
         "        hierarchy = json.load(archive.extractfile(entry['hierarchy_member']))",
         "        print(row['index'], viewport, row['source_url'], hierarchy['capture'])",
         "```", "",
-        "`viewports[<viewport>].image_member` and `hierarchy_member` locate the untouched ",
-        "`full.png`/`initial.png` and `hierarchy.json` inside `chunk`; their paths match the "
-        "source collection. `original_image_path` and `original_hierarchy_path` repeat those "
+        "`viewports[<viewport>].image_member` and `hierarchy_member` locate the "
+        "`full.png`/`initial.png` and `hierarchy.json` inside `chunk`; their member paths match "
+        "the source collection. `original_image_path` and `original_hierarchy_path` repeat those "
         "paths for traceability. The JSONL row omits the bulky hierarchy objects themselves.", "",
+        hierarchy_note, "",
         "Annotations are rule-generated candidates, not human-verified ground truth. "
         "No train/validation/test partition is implied: `train` is only the shard prefix. "
         "Keep all resolutions and pages of a site in the same split when creating evaluation data.", "",
@@ -521,40 +550,114 @@ def resolve_inputs(inputs):
     return roots
 
 
-def pack_dataset(inputs, output, chunk_size_mb=1024, seed=42, require_url=False,
-                 dedupe_by="url"):
-    """Merge collection runs, dedupe whole page groups, and write gzip shards.
-
-    ``inputs`` may be one path or a list of collection roots. Dedupe never separates
-    a page's viewports and never merges viewports from different runs.
-    """
-    roots = resolve_inputs(inputs)
+def _validate_package_options(output, chunk_size_mb, dedupe_by, roots=(), derived_root=None,
+                              workers=1):
+    """Validate output ownership and chunk options before any member is written."""
+    if type(workers) is not int or workers < 1:
+        raise ValueError("workers must be a positive integer")
     output = Path(output).resolve()
     for root in roots:
         if output == root or root in output.parents or output in root.parents:
             raise ValueError("Input and output directories must not contain each other")
+    if derived_root is not None:
+        derived_root = Path(derived_root).resolve()
+        if output == derived_root or derived_root in output.parents or output in derived_root.parents:
+            raise ValueError("Packaging output and derived hierarchies must not contain each other")
     if output.exists() and any(output.iterdir()):
         raise ValueError("Output must be empty; completed chunks are never overwritten")
     if chunk_size_mb <= 0:
         raise ValueError("Chunk size must be positive")
     if dedupe_by not in ("url", "site", "none"):
         raise ValueError(f"Unsupported dedupe mode: {dedupe_by}")
-    samples = []
-    input_stats = []
-    prefix_runs = len(roots) > 1
-    for number, root in enumerate(roots):
-        run_id = f"run-{number:03d}"
-        run_samples = list_samples(root, require_url)
-        for sample in run_samples:
-            sample["source"] = root
-            sample["run_id"] = run_id
-            sample["run_name"] = root.name
-            # A single run extracts back to its exact root; multiple runs need a
-            # top-level run folder to avoid collapsing identical relative paths.
-            sample["archive_prefix"] = f"{run_id}/" if prefix_runs else ""
-        samples.extend(run_samples)
-        input_stats.append({"id": run_id, "name": root.name, "images": len(run_samples),
-                            "pages": 0, "kept_pages": 0, "kept_images": 0})
+    return output
+
+
+def _curlie_source(roots):
+    """Detect a Curlie authority index for the data card attribution."""
+    for root in roots:
+        index_file = root / "collection-index.json"
+        if index_file.is_file():
+            try:
+                if (json.loads(index_file.read_text(encoding="utf-8")).get("schema")
+                        == "curlie_page_target_v1"):
+                    return True
+            except (OSError, json.JSONDecodeError):
+                pass
+    return False
+
+
+def _write_pages_parallel(pages, data_directory, target_bytes, workers, progress, started):
+    """Write contiguous page buckets with independent gzip streams.
+
+    Each worker gets a unique shard prefix so page-atomic chunks can be compressed in
+    parallel; rows are returned with globally unique indexes and merged afterwards.
+    """
+    total = len(pages)
+    workers = min(workers, total)
+    size, extra = divmod(total, workers)
+    buckets, offset = [], 0
+    for number in range(workers):
+        count = size + (1 if number < extra else 0)
+        buckets.append((number, offset, pages[offset:offset + count]))
+        offset += count
+    interval = max(1, total // 20)
+    lock = threading.Lock()
+    state = {"written": 0, "shards_closed": 0}
+
+    def work(number, start, bucket):
+        writer = ChunkWriter(data_directory, target_bytes, prefix=f"train-{number:02d}")
+        rows = []
+        try:
+            for local, page in enumerate(bucket):
+                rows.append(writer.add_page(start + local, page))
+                if writer.current_size() >= target_bytes:
+                    writer.close()
+                    with lock:
+                        state["shards_closed"] += 1
+                with lock:
+                    state["written"] += 1
+                    written = state["written"]
+                    if progress and (written == total
+                                     or (total > 20 and written % interval == 0)):
+                        print(json.dumps({"type": "pack_progress", "phase": "running",
+                                          "written": written, "total": total,
+                                          "percent": round(written * 100 / total, 1),
+                                          "shards_closed": state["shards_closed"],
+                                          "workers": workers,
+                                          "seconds": round(time.monotonic() - started, 1)},
+                                         ensure_ascii=False), flush=True)
+            was_open = writer.is_open
+            writer.close()
+            if was_open:
+                with lock:
+                    state["shards_closed"] += 1
+            return rows, writer.shards
+        except BaseException:
+            writer.abort()
+            raise
+
+    results = []
+    errors = []
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = [pool.submit(work, number, start, bucket)
+                   for number, start, bucket in buckets]
+        for future in as_completed(futures):
+            try:
+                results.append(future.result())
+            except BaseException as error:
+                errors.append(error)
+    if errors:
+        raise errors[0]
+    rows = sorted((row for page_rows, _ in results for row in page_rows),
+                  key=lambda row: row["index"])
+    shards = sorted((shard for _, page_shards in results for shard in page_shards),
+                    key=lambda shard: shard["file"])
+    return rows, shards
+
+
+def _write_dataset(samples, input_stats, output, chunk_size_mb, seed, dedupe_by, roots,
+                   extra_summary=None, progress=False, workers=1):
+    """Group samples into atomic pages, dedupe, and write shards and metadata."""
     pages = group_samples(samples)
     stats_by_run = {item["id"]: item for item in input_stats}
     for page in pages:
@@ -567,35 +670,74 @@ def pack_dataset(inputs, output, chunk_size_mb=1024, seed=42, require_url=False,
     random.Random(seed).shuffle(pages)
     kept_samples = [sample for page in pages for sample in page]
     target_bytes = int(chunk_size_mb * 1024 * 1024)
+    total_pages = len(pages)
+    interval = max(1, total_pages // 20)
+    started = time.monotonic()
+    if type(workers) is not int or workers < 1:
+        raise ValueError("workers must be a positive integer")
+    workers = min(workers, max(1, total_pages))
+    if progress:
+        print(json.dumps({"type": "pack_progress", "phase": "start", "pages": total_pages,
+                          "images": len(kept_samples), "dropped_pages": len(duplicates),
+                          "workers": workers}, ensure_ascii=False), flush=True)
     (output / "data").mkdir(parents=True, exist_ok=True)
-    writer = ChunkWriter(output / "data", target_bytes)
     categories = collections.Counter()
     viewports = collections.Counter()
     versions = collections.Counter()
     viewports_per_page = collections.Counter()
     missing_url = 0
-    index_stream = (output / "metadata.jsonl.partial").open("w", encoding="utf-8")
-    try:
-        for number, page in enumerate(pages):
-            row = writer.add_page(number, page)
-            index_stream.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n")
+    if workers > 1:
+        rows, writer_shards = _write_pages_parallel(
+            pages, output / "data", target_bytes, workers, progress, started)
+        for row in rows:
             categories[row["category"] or "Unknown"] += 1
             viewports.update(row["viewports"].keys())
             versions[row["annotation_rule_version"]] += 1
             viewports_per_page[row["image_count"]] += 1
             missing_url += not bool(row["source_url"])
-            if writer.current_size() >= target_bytes:
-                writer.close()
-                index_stream.flush()
-        writer.close()
-        index_stream.flush()
-        os.fsync(index_stream.fileno())
-    except BaseException:
-        writer.abort()
+        index_stream = (output / "metadata.jsonl.partial").open("w", encoding="utf-8")
+        try:
+            for row in rows:
+                index_stream.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n")
+            index_stream.flush()
+            os.fsync(index_stream.fileno())
+        finally:
+            index_stream.close()
+        (output / "metadata.jsonl.partial").replace(output / "metadata.jsonl")
+    else:
+        writer = ChunkWriter(output / "data", target_bytes)
+        index_stream = (output / "metadata.jsonl.partial").open("w", encoding="utf-8")
+        try:
+            for number, page in enumerate(pages):
+                row = writer.add_page(number, page)
+                index_stream.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n")
+                categories[row["category"] or "Unknown"] += 1
+                viewports.update(row["viewports"].keys())
+                versions[row["annotation_rule_version"]] += 1
+                viewports_per_page[row["image_count"]] += 1
+                missing_url += not bool(row["source_url"])
+                if writer.current_size() >= target_bytes:
+                    writer.close()
+                    index_stream.flush()
+                written = number + 1
+                if progress and (written == total_pages
+                                 or (total_pages > 20 and written % interval == 0)):
+                    print(json.dumps({"type": "pack_progress", "phase": "running",
+                                      "written": written, "total": total_pages,
+                                      "percent": round(written * 100 / total_pages, 1),
+                                      "shards": len(writer.shards) + (1 if writer.is_open else 0),
+                                      "seconds": round(time.monotonic() - started, 1)},
+                                     ensure_ascii=False), flush=True)
+            writer.close()
+            index_stream.flush()
+            os.fsync(index_stream.fileno())
+        except BaseException:
+            writer.abort()
+            index_stream.close()
+            raise
         index_stream.close()
-        raise
-    index_stream.close()
-    (output / "metadata.jsonl.partial").replace(output / "metadata.jsonl")
+        (output / "metadata.jsonl.partial").replace(output / "metadata.jsonl")
+        writer_shards = writer.shards
 
     if dedupe_by != "none":
         duplicate_stream = (output / "duplicates.jsonl.partial").open("w", encoding="utf-8")
@@ -608,6 +750,7 @@ def pack_dataset(inputs, output, chunk_size_mb=1024, seed=42, require_url=False,
 
     source_ids = {sample["provenance"]["source_id"] for sample in kept_samples
                   if sample["provenance"]["source_id"]}
+    prefix_runs = len(input_stats) > 1
     summary = {
         "schema": PACKAGE_SCHEMA,
         "status": "completed",
@@ -629,7 +772,8 @@ def pack_dataset(inputs, output, chunk_size_mb=1024, seed=42, require_url=False,
         "viewports": dict(viewports),
         "viewports_per_page": {str(count): pages for count, pages in viewports_per_page.items()},
         "annotation_versions": dict(versions),
-        "shards": writer.shards,
+        "shards": writer_shards,
+        "pack_workers": workers,
         "archive_layout": "original_published_tree",
         "archive_prefix": "run-<id>/" if prefix_runs else "",
         "layout": "<original relative path>/<viewport>/<full.png|initial.png|hierarchy.json>",
@@ -637,18 +781,173 @@ def pack_dataset(inputs, output, chunk_size_mb=1024, seed=42, require_url=False,
         "hierarchy_policy": "original_hierarchy_bytes",
         "index_policy": "metadata.jsonl one row per page; members keep original relative paths",
     }
-    curlie = False
-    for root in roots:
-        index_file = root / "collection-index.json"
-        if index_file.is_file():
-            try:
-                if (json.loads(index_file.read_text(encoding="utf-8")).get("schema")
-                        == "curlie_page_target_v1"):
-                    curlie = True
-            except (OSError, json.JSONDecodeError):
-                pass
+    if extra_summary:
+        summary.update(extra_summary)
+    curlie = _curlie_source(roots)
     (output / "README.md").write_text(dataset_card(summary, curlie), encoding="utf-8")
     manifest = output / "manifest.json.partial"
     manifest.write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     manifest.replace(output / "manifest.json")
     return summary
+
+
+def pack_dataset(inputs, output, chunk_size_mb=1024, seed=42, require_url=False,
+                 dedupe_by="url", progress=False, workers=1):
+    """Merge collection runs, dedupe whole page groups, and write gzip shards.
+
+    ``inputs`` may be one path or a list of collection roots. Dedupe never separates
+    a page's viewports and never merges viewports from different runs.
+    """
+    roots = resolve_inputs(inputs)
+    output = _validate_package_options(output, chunk_size_mb, dedupe_by, roots,
+                                       workers=workers)
+    samples = []
+    input_stats = []
+    prefix_runs = len(roots) > 1
+    for number, root in enumerate(roots):
+        run_id = f"run-{number:03d}"
+        run_samples = list_samples(root, require_url)
+        for sample in run_samples:
+            sample["source"] = root
+            sample["run_id"] = run_id
+            sample["run_name"] = root.name
+            # A single run extracts back to its exact root; multiple runs need a
+            # top-level run folder to avoid collapsing identical relative paths.
+            sample["archive_prefix"] = f"{run_id}/" if prefix_runs else ""
+        samples.extend(run_samples)
+        input_stats.append({"id": run_id, "name": root.name, "images": len(run_samples),
+                            "pages": 0, "kept_pages": 0, "kept_images": 0})
+    return _write_dataset(samples, input_stats, output, chunk_size_mb, seed, dedupe_by, roots,
+                          progress=progress, workers=workers)
+
+
+def pack_index(index_path, output, chunk_size_mb=1024, seed=42, require_url=False,
+               dedupe_by="url", resume=False, progress=False, workers=1):
+    """Package pages selected by a pipeline index.
+
+    Screenshots resolve from each page's original run root. Hierarchies resolve from
+    the original run when ``hierarchy_side`` is ``original`` and from the index's
+    ``hierarchies_root`` after postprocessing. Archive member paths stay the original
+    published paths, so only the hierarchy bytes differ from a directory-scan package.
+    """
+    from pipeline.index import load_index, resolve_path, sha256_file
+
+    index_path = Path(index_path).resolve()
+    index = load_index(index_path)
+    index_hash = sha256_file(index_path)
+    derived_root = (Path(index["hierarchies_root"]).resolve()
+                    if index.get("hierarchies_root") else None)
+    if derived_root is not None and not derived_root.is_dir():
+        raise ValueError(f"Derived hierarchy root does not exist: {derived_root}")
+    run_roots = [(run["id"], Path(run["root"]).resolve()) for run in index["runs"]]
+    roots = [root for _, root in run_roots]
+    output_path = Path(output).resolve()
+    if output_path.exists() and any(output_path.iterdir()):
+        manifest_path = output_path / "manifest.json"
+        existing = None
+        if resume and manifest_path.is_file():
+            try:
+                existing = json.loads(manifest_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                existing = None
+        if existing:
+            own = existing.get("pipeline_index") or {}
+            same = (existing.get("status") == "completed"
+                    and own.get("sha256") == index_hash
+                    and existing.get("chunk_size_mb") == chunk_size_mb
+                    and existing.get("seed") == seed
+                    and (existing.get("dedupe") or {}).get("by") == dedupe_by
+                    and existing.get("pack_workers", 1) == workers
+                    and (not require_url or existing.get("missing_url", 0) == 0))
+            if same:
+                existing["resumed"] = True
+                if progress:
+                    print(json.dumps({"type": "pack_progress", "phase": "skipped",
+                                      "pages": existing.get("pages"),
+                                      "output": str(output_path)}, ensure_ascii=False), flush=True)
+                return existing
+            raise ValueError("Existing packages belong to a different index or options; "
+                             "choose a new output directory")
+        raise ValueError("Output must be empty; completed chunks are never overwritten")
+    output = _validate_package_options(output_path, chunk_size_mb, dedupe_by, roots, derived_root,
+                                       workers=workers)
+    run_lookup = dict(run_roots)
+    required = list(index["required_viewports"])
+    prefix_runs = len(run_roots) > 1
+    input_stats = [{"id": run_id, "name": root.name, "images": 0,
+                    "pages": 0, "kept_pages": 0, "kept_images": 0}
+                   for run_id, root in run_roots]
+    stats_by_run = {item["id"]: item for item in input_stats}
+    samples = []
+    skipped_pages = 0
+    for page in index["pages"]:
+        if page.get("status") != "valid":
+            skipped_pages += 1
+            continue
+        run_id = page["run_id"]
+        if run_id not in run_lookup:
+            raise ValueError(f"Page references unknown run: {run_id}")
+        root = run_lookup[run_id]
+        for viewport in required:
+            record = page["viewports"].get(viewport)
+            if record is None:
+                raise ValueError(f"Valid page {page.get('page_id')} lacks viewport {viewport}")
+            if not record.get("image"):
+                raise ValueError(f"Valid page {page.get('page_id')} lacks an image for {viewport}")
+            side = record.get("hierarchy_side", "original")
+            base = derived_root if side == "derived" else root
+            if base is None:
+                raise ValueError(f"Page {page.get('page_id')} needs a derived hierarchy root")
+            image = resolve_path(root, record["image"], f"{page.get('page_id')}.{viewport}.image")
+            hierarchy = resolve_path(base, record["hierarchy"], f"{page.get('page_id')}.{viewport}.hierarchy")
+            label = json.loads(hierarchy.read_text(encoding="utf-8"))
+            if not isinstance(label, dict):
+                raise ValueError(f"Hierarchy must be a JSON object: {hierarchy}")
+            capture = label.get("capture", {})
+            name = capture.get("image", "initial.png") if isinstance(capture, dict) else None
+            if name not in ("full.png", "initial.png") or Path(record["image"]).name != name:
+                raise ValueError(f"Image name disagrees with capture.image: {hierarchy}")
+            width, height = png_dimensions(image)
+            if (capture.get("width", width) != width or capture.get("height", height) != height):
+                raise ValueError(f"Image/label dimensions differ: {image}")
+            url = page.get("url")
+            if require_url and not url:
+                raise ValueError(f"Missing page URL: {page.get('page_id')}")
+            provenance = {
+                "page_id": page.get("page_id"), "source_id": page.get("source_id"),
+                "viewport": viewport, "url": url, "entry_url": page.get("entry_url"),
+                "title": page.get("title"), "category": page.get("category"),
+                "category_path": page.get("category_path"),
+                "url_source": page.get("url_source") or "pipeline_index",
+            }
+            sample = {
+                "image": image, "hierarchy_path": hierarchy, "provenance": provenance,
+                "width": width, "height": height, "source": root, "run_id": run_id,
+                "run_name": root.name,
+                "archive_prefix": f"{run_id}/" if prefix_runs else "",
+                "image_rel": record["image"],
+                "hierarchy_rel": record.get("original_hierarchy") or record["hierarchy"],
+                "hierarchy_side": side,
+                "hierarchy_sha256": record.get("hierarchy_sha256"),
+            }
+            if side == "derived":
+                sample["derived_hierarchy_path"] = record["hierarchy"]
+            samples.append(sample)
+            stats_by_run[run_id]["images"] += 1
+    if not samples:
+        raise ValueError("No valid pages in the pipeline index")
+    any_derived = any(sample["hierarchy_side"] == "derived" for sample in samples)
+    extra = {
+        "pipeline_index": {
+            "path": str(index_path),
+            "sha256": index_hash,
+            "stage": index["stage"],
+            "hierarchies_root": str(derived_root) if derived_root else None,
+            "required_viewports": required,
+            "skipped_pages": skipped_pages,
+        },
+        "hierarchy_policy": ("derived_clean_hierarchy" if any_derived else "original_hierarchy_bytes"),
+    }
+    return _write_dataset(samples, input_stats, output, chunk_size_mb, seed,
+                          dedupe_by, roots, extra_summary=extra, progress=progress,
+                          workers=workers)

@@ -117,7 +117,7 @@ class GroupingTest(unittest.TestCase):
         messages, stats = client.messages(original, 'data:image/png;base64,test', {'candidates': candidates(original)}, client.task())
         value = json.loads(messages[1]['content'][0]['text'].split('\n', 1)[1])
         self.assertIn('json', messages[0]['content'].lower())
-        self.assertEqual(set(value), {'original', 'current_tree', 'candidates'})
+        self.assertEqual(set(value), {'original', 'current_tree', 'candidates', 'pixel_candidates'})
         self.assertEqual(stats['original_box_rows'], len(original['nodes']))
         self.assertEqual(sum(c['type'] == 'image_url' for c in messages[1]['content']), 1)
         with self.assertRaises(ValueError):
@@ -132,14 +132,14 @@ class GroupingTest(unittest.TestCase):
                 return {'groups': [accept(context['candidates'][0])]+[{'candidate_id': g['candidate_id'], 'decision': 'reject'} for g in context['candidates'][1:]]}, {'usage': {'prompt_tokens': 123, 'completion_tokens': 20}}
             with patch('grouping_pipeline.Client') as api:
                 api.return_value.call.side_effect = reply
-                record = process(file, source, root/'out', {'api': {'model': 'mock'}}, False)
+                record = process(file, source, root/'out', {'api': {'model': 'mock'}, 'accumulation': {'fold_sparse_min_children': 2}}, False)
                 self.assertEqual(record['status'], 'accepted')
                 self.assertEqual(api.return_value.call.call_count, 1)
                 result = json.loads((root/'out/hierarchy.json').read_text())
                 self.assertFalse(result['postprocess']['whole_tree_vlm_verified'])
                 self.assertEqual(sum(op['op'] == 'group' for op in result['postprocess']['operations'] if op['reason'].startswith('vlm_candidate_')), 1)
                 self.assertEqual(file.read_bytes(), frozen)
-                cached = process(file, source, root/'out2', {'api': {'model': 'mock'}}, False, root/'out/layer-review.json')
+                cached = process(file, source, root/'out2', {'api': {'model': 'mock'}, 'accumulation': {'fold_sparse_min_children': 2}}, False, root/'out/layer-review.json')
                 self.assertEqual(cached['status'], 'accepted')
                 self.assertEqual(api.return_value.call.call_count, 1)
 
@@ -149,7 +149,7 @@ class GroupingTest(unittest.TestCase):
             file = source/'hierarchy.json'; file.write_text(json.dumps(fixture())); png(source/'full.png')
             with patch('grouping_pipeline.Client') as api:
                 api.return_value.call.return_value = ({'groups': []}, {})
-                record = process(file, source, root/'out', {'api': {'model': 'mock'}}, False)
+                record = process(file, source, root/'out', {'api': {'model': 'mock'}, 'accumulation': {'fold_sparse_min_children': 2}}, False)
             self.assertEqual(record['status'], 'accepted')
             audit = json.loads((root/'out/layer-review.json').read_text())
             self.assertTrue(audit['grouping_warnings'])
@@ -161,7 +161,7 @@ class GroupingTest(unittest.TestCase):
             root = Path(temp); file = root/'hierarchy.json'
             file.write_text(json.dumps(tree([{**node('img'), 'struct': 'image'}]))); png(root/'full.png')
             with patch('grouping_pipeline.Client') as api:
-                record = process(file, root, root/'out', {'api': {'model': 'mock'}}, False)
+                record = process(file, root, root/'out', {'api': {'model': 'mock'}, 'accumulation': {'fold_sparse_min_children': 2}}, False)
                 self.assertEqual(record['status'], 'accepted'); api.assert_not_called()
 
 

@@ -1,79 +1,69 @@
-# 独立四级视觉层级后处理 v5
+# 独立层级后处理 v13
 
-当前默认：**规则规范化 → 候选区域组合 → VLM 判断候选 → 程序分组与检查**。
-不改采集器、截图、原始 DOM 或原始 hierarchy.json。仅写独立输出目录。
+当前流程：**完整树规范化 → 各深度生成融合候选 → 模型判断 → 自底向上替换/拆解上层 → 严格补缺到 L4 → 其余细节归档 L5**。
 
-## VLM 只负责组合判断
+完整规则与阈值：[第四层累计与第五层归档](ACCUMULATE_L4_ARCHIVE_L5.md)。v9 严格删除不再是默认行为。v11 修正 v10 将容器内部细节展平到第四层的问题：同父既有 L4 覆盖至少 95% 的候选留在 L5，新增候选之间不保留相互包含的框。
 
-- 原图与所有原始框仍完整提供；当前有效树单独给出，不让旧框充当当前节点。
-- 规则在各保留深度查找同父、邻接、空间空隙及标题内容组合，候选全页最多 64 个。
-- 模型对每个候选返回 accept / reject / uncertain；accept 可以选择至少两个候选成员。
-- 禁止模型删除、恢复、任意重挂、修改 bbox、生成新候选或给全树通过结论。
-- group 创建共同父节点，bbox 使用成员外接框，成员和后代都保留。
-- 同一节点不能同时进入两个获批组合；不得超出四层预算。非法建议记录，不应用。
-- 不再进行第二次模型自审。有候选每页一次调用，无候选零调用。
-- 分组后不再执行可能删除成员的第二轮 normalize，避免组合收益被悄悄抵消。
-
-已有确定性 normalize 中的压缩、清理、区域提升与分组保持原规则；它们并未全部交给
-VLM 否决。该版本验证的是新增候选组合，不是全树视觉正确性。
-候选只使用规范化后仍存在的节点，不能恢复此前已丢弃的原始深层细节。
+最终交付格式为 **真实 L1–L5 的 nodes＋图片**，详见 [最终导出](FINAL_EXPORT.md)。四层主体与归档仅是诊断表示，不再当作最终训练格式。
 
 ## 运行
 
 ```bash
 cd responsive-ui-dataset
-# 使用已有私有配置；首次使用再复制 config.example.json 并填写接口、模型和 key。
+# 使用已有 config.local.json；首次才复制示例并填写接口、模型和 key。
+python3 -m pip install -r scripts/layer_postprocess/requirements-pixels.txt
+
+# 无 API 预览。必须从原始输入处理，不要接已严格删除的派生输出。
 python3 scripts/layer_postprocess/cli.py \
-  --input ../datasets/pages \
-  --output runs/layers-grouping-01 \
+  --input ../datasets/pages --output runs/layers-v12-preview \
+  --config scripts/layer_postprocess/config.local.json \
+  --dry-run --limit 100 --concurrency 4
+
+# 实际模型判断：每份最多一次请求；没有候选则跳过 API。
+python3 scripts/layer_postprocess/cli.py \
+  --input ../datasets/pages --output runs/layers-v12-model \
   --config scripts/layer_postprocess/config.local.json \
   --limit 10 --concurrency 3
 
-# 仅规则及候选预览，不付费
-python3 scripts/layer_postprocess/cli.py \
-  --input ../datasets/pages \
-  --output runs/layers-grouping-preview \
-  --config scripts/layer_postprocess/config.local.json \
-  --limit 10 --dry-run
-
-python3 scripts/layer_postprocess/compare.py --output runs/layers-grouping-01
+python3 scripts/layer_postprocess/compare.py \
+  --output runs/layers-v12-preview --baseline runs/layers-vlm-09-strict-preview-42
 ```
 
-支持 --select、--resume、--reuse-edits。同版本缓存的规则准备和候选必须完全一致；
-旧版全树 operations 不可复用为候选投票。--context-mode 仅保留旧命令兼容，
-当前分组模式始终使用单次完整原始证据请求。
+输入/输出必须独立。API 为兼容 OpenAI 的 Chat Completions、图像 data URL 和 JSON 输出。
+密钥放在已忽略提交的 config.local.json 或环境变量，不打印到日志。
+像素路径使用 Pillow/NumPy；设 pixels.pixel_fallback_enabled=false 可关闭。
+支持 --select、--resume、--reuse-edits。缓存须同版本、同原始输入、同规则准备与候选；不能把旧分组投票当成新替换批准。
 
-配置保留 api、rules、concurrency。新增 grouping.max_candidates（默认 64，1..256）
-与 grouping.group_max_gap_px（默认 48 CSS px）。不应靠扩大候选数代替视觉质量验证。
+## 输出
 
-## 输出语义
+融合先于归档，详见 [流程与验证约束](FUSION_BEFORE_ARCHIVE.md)。dry-run 的四层预览只供查看，不作为融合输入。
 
-- layer-review.json：rule_operations、group_candidates、group_response、applied_group_operations、
-  rejected_operations、unresolved_candidates、实际调用时间和 usage。
-- rule-hierarchy.json：模型调用前的纯规则基线，方便单独评价 VLM 增益。
-- candidate-hierarchy.json：始终保留可用的派生候选。
-- hierarchy.json 与原图副本：仅在已执行的组合有效、局部结构检查通过时发布。
-- 未返回或 uncertain 的候选保持原树，记录 grouping_warnings，不当作批准或整页否决。
-  非法组合或仍未解决的非原子 L1 大框（面积 >60%）标记 needs_review。
-  不借用模型组合决定冒充大框豁免。原子大图仍按既有规则豁免。
-- accepted 仅表示本流程的结构及候选处理条件通过，**不是人工质量评分**。
-  annotation_status=rule_candidate_vlm_grouped_unverified；whole_tree_vlm_verified=false。
 
-四级含义不变：L1 页面大区域；L2 组件分组；L3 主要内容；L4 必要细节。
-训练仍须处理 ignore_regions。新父区域没有 DOM selector。
+- fused-hierarchy.json：模型处理后、归档前的完整树，用于最终五层导出。
+- fusion-input-hierarchy.json：归档前的完整规范化树，模型实际使用此树，允许 L5+ 参与候选。
+- rule-hierarchy.json：模型前的四层主体和第五层细节档案。
+- candidate-hierarchy.json：安全执行后的候选；hierarchy.json 与原图副本用于正式处理输出。
+- detail_archive.nodes：独立第五层档案，保留原 bbox、原层级、原 parent、对应主框 owner 和原因；默认训练只读取主树 nodes。
+- layer-review.json：累计统计、尺寸组/惩罚、密度触发器、模型决定、实际调用 usage 和拒绝项。
+- layer-postprocess-report.json：批次状态。
+- comparison.html：自由选层，L1–4 看主体，L5 看归档。
 
-## 模块与验证
+第五层是非训练档案，不强行建立虚假的训练 parent 链。主树 parent 与层级保持一致，允许分支提前结束。
+接受/结构通过不代表人工质量通过；模型可不修改，不把分组数量当成收益。
 
-- grouping.py：纯规则候选与严格投票执行；复用 layout.partition、rules.apply_operations。
-- grouping_vlm.py：单次候选提示词，继承 vlm.Client 的 HTTP、超时、凭据与 usage 处理。
-- grouping_pipeline.py：规则 → 单次判断 → 局部检查 → 独立发布。
-- storage.py：复用的原图尺寸校验和原子 JSON 写入。
-- cli.py：文件扫描、并发和恢复；compare.py 继续复用分层对比网页。
-- legacy_pipeline.py / LEGACY_V4.md：历史全树方案，仅用于旧实验和回归，不由当前 CLI 调用。
+## 模块
+
+- layer_accumulation.py：补入真正缺少的主框、对应/近同框去重、比例与相近尺寸频次、归档。
+- replacement_groups.py：复用已有下层区域或拆解上层；原成员不加深。
+- grouping.py / grouping_vlm.py：密度条件下的必要替换候选及一次模型判断。
+- pixel_regions.py：子块分解失败后的 DCGen 式分隔候选；分区框与训练候选框不同。
+- normalize.py / semantic_cleanup.py：复用既有几何清理和包装收缩；当前流程不启用严格语义删除。
+- storage.py、compare.py：复用的存储与查看；analyze_deep_layers.py：批次分层诊断。
+- legacy_pipeline.py、deep_noise.py：历史方案与回归参考，不是当前默认删除策略。
 
 ```bash
 python3 -m unittest discover -s scripts/layer_postprocess -p 'test_*.py'
 ```
 
-历史设计参考 [自底向上规则](FRONTIER_NORMALIZATION.md)、[空间划分](LAYOUT_NORMALIZATION.md)。
-[精简上下文](COMPACT_CONTEXT.md) 和旧 token benchmark 描述的是历史双阶段实验。
+历史设计：SEMANTIC_AND_PIXEL_RULES.md、STRICT_REPLACEMENT_RULES.md、LEGACY_V4.md。
+不改采集器、截图/DOM 对应或原始数据。

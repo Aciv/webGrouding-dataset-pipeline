@@ -1,0 +1,23 @@
+ nohup python3 -u scripts/curlie/cli.py   --output runs/curlie-continue-unlimited   --skip-history     runs/curlie-full-10k     runs/curlie-homepage-10k   --target-pages 1000000000   --batch-sites 80   --concurrency 40   --site-timeout-seconds 180   --no-explore-pages   --export-only --resume  > curlie-continue-unlimited.log 2>&1 &
+
+
+  python3 scripts/pipeline/cli.py run \
+    --input runs/curlie-homepage-10k \
+    --workdir runs/pipe-10k-64 \
+    --config scripts/layer_postprocess/config.local.json \
+    --filter-workers 64 \
+    --vlm-concurrency 64 \
+    --pixel-concurrency 6 \
+    --pack-workers 12 \
+    --stop-after final-filter
+
+
+  python3 scripts/pipeline/cli.py postprocess \
+    --index runs/pipe64/index-filtered.json \
+    --index-output runs/pipe64/index-postprocessed-retry.json \
+    --hierarchy-root runs/pipe64/hierarchies \
+    --processing-output runs/pipe64/processing \
+    --config scripts/layer_postprocess/config.local.json \
+    --resume \
+    --vlm-concurrency 24 --pixel-concurrency 4
+

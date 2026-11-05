@@ -1,6 +1,7 @@
 """Atomic derived JSON output and canonical screenshot validation; source remains read-only."""
 import json
 import struct
+from pathlib import Path
 
 def write(file, value):
     """Atomically publish UTF-8 JSON within the derived output only."""
@@ -8,6 +9,18 @@ def write(file, value):
     temp = file.with_suffix(file.suffix+".tmp")
     temp.write_text(json.dumps(value, ensure_ascii=False, indent=2)+"\n")
     temp.replace(file)
+
+
+def validate_image(image, tree):
+    """Verify a canonical screenshot's PNG header and declared dimensions."""
+    image = Path(image).resolve()
+    with image.open("rb") as handle:
+        header = handle.read(24)
+    if header[:8] != b"\x89PNG\r\n\x1a\n" or len(header) != 24:
+        raise ValueError("Invalid PNG header")
+    if struct.unpack(">II", header[16:24]) != (tree["capture"]["width"], tree["capture"]["height"]):
+        raise ValueError("Screenshot dimensions disagree with hierarchy")
+    return image
 
 
 def image_path(file, tree):
@@ -18,12 +31,6 @@ def image_path(file, tree):
     image = (file.parent/name).resolve()
     if image.parent != file.parent.resolve():
         raise ValueError("Screenshot must remain in its observation directory")
-    with image.open("rb") as handle:
-        header = handle.read(24)
-    if header[:8] != b"\x89PNG\r\n\x1a\n" or len(header) != 24:
-        raise ValueError("Invalid PNG header")
-    if struct.unpack(">II", header[16:24]) != (tree["capture"]["width"], tree["capture"]["height"]):
-        raise ValueError("Screenshot dimensions disagree with hierarchy")
-    return image
+    return validate_image(image, tree)
 
 

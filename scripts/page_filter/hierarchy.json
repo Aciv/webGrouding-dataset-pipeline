@@ -1,0 +1,150 @@
+{
+  "schema": "visual_hierarchy_candidate_v1",
+  "rule_version": "dom_visual_rules_6_child_geometry",
+  "structure_rule_version": "dom_structure_v1",
+  "annotation_status": "rule_generated_unverified",
+  "parent_basis": "retained_dom_ancestor_with_sibling_absorption",
+  "geometry_policy": {
+    "siblingIou": 0.9,
+    "parentSizeTolerance": 0.02
+  },
+  "capture": {
+    "documentId": "c031f6c0-8b9f-4dea-ba66-c8da5cfe913d",
+    "capturedAt": "2026-11-04T14:30:54.636Z",
+    "url": "http://www.brandedge.com/",
+    "image": "full.png",
+    "width": 1440,
+    "height": 900
+  },
+  "nodes": [
+    {
+      "struct": "table",
+      "subtype": "table",
+      "kind": "group",
+      "disposition": "detection",
+      "semantic_role": "table",
+      "text_role": null,
+      "source_node_ids": [
+        "n000005"
+      ],
+      "structure_reasons": [
+        "native_table"
+      ],
+      "node_id": "n000005",
+      "parent_id": null,
+      "layer": 0,
+      "semantic_hint": "table",
+      "tag": "table",
+      "selector": "#AutoNumber1",
+      "bbox": [
+        8,
+        8,
+        1424,
+        884
+      ],
+      "source_dom_parent_id": "n000004",
+      "layout_bbox": [
+        8,
+        8,
+        1424,
+        884
+      ],
+      "interaction_role": null,
+      "fragments": [
+        [
+          8,
+          8,
+          1424,
+          884
+        ]
+      ],
+      "geometry_warnings": [],
+      "reasons": [
+        "native_table"
+      ],
+      "selection_priority": 70
+    }
+  ],
+  "decisions": [
+    {
+      "node_id": "n000028",
+      "status": "excluded",
+      "reason": "outside_ancestor_clip",
+      "represented_by": null
+    },
+    {
+      "node_id": "n000000",
+      "status": "excluded",
+      "reason": "non_independent_tag",
+      "represented_by": null
+    },
+    {
+      "node_id": "n000004",
+      "status": "excluded",
+      "reason": "non_independent_tag",
+      "represented_by": null
+    },
+    {
+      "node_id": "n000009",
+      "status": "excluded",
+      "reason": "inside_atomic_object",
+      "represented_by": "n000005"
+    },
+    {
+      "node_id": "n000010",
+      "status": "excluded",
+      "reason": "inside_atomic_object",
+      "represented_by": "n000005"
+    },
+    {
+      "node_id": "n000006",
+      "status": "excluded",
+      "reason": "child_same_size_as_parent",
+      "represented_by": "n000005"
+    },
+    {
+      "node_id": "n000007",
+      "status": "excluded",
+      "reason": "child_same_size_as_parent",
+      "represented_by": "n000005"
+    },
+    {
+      "node_id": "n000008",
+      "status": "excluded",
+      "reason": "child_same_size_as_parent",
+      "represented_by": "n000005"
+    },
+    {
+      "node_id": "n000005",
+      "status": "retained",
+      "reason": "native_table",
+      "represented_by": "n000005"
+    }
+  ],
+  "ignore_regions": [],
+  "stats": {
+    "raw_visible": 9,
+    "retained": 1,
+    "excluded": 8,
+    "visible_after_clipping": 8,
+    "ancestor_clipped_out": 1,
+    "area_filtered_out": 0,
+    "css_hidden_out": 0,
+    "screen_reader_only_out": 0,
+    "ancestor_clipped_partial": 0,
+    "roots": 1,
+    "max_layer": 0,
+    "by_layer": {
+      "0": 1
+    },
+    "by_kind": {
+      "group": 1
+    },
+    "by_struct": {
+      "table": 1
+    },
+    "by_disposition": {
+      "detection": 1
+    }
+  }
+}
