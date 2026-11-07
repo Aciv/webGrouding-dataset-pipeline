@@ -404,6 +404,9 @@ class ChunkWriter:
                 "original_image_path": image_rel,
                 "original_hierarchy_path": hierarchy_rel,
             }
+            if label.get('detail_training_selection'):
+                entry['detail_trainable_crops'] = len(label['detail_training_crop_ids'])
+                entry['discarded_detail_crops'] = len(label['discarded_detail_crop_ids'])
             if sample.get("hierarchy_side") == "derived":
                 entry["derived_hierarchy_path"] = sample.get("derived_hierarchy_path")
             record["viewports"][viewport] = entry
@@ -445,6 +448,23 @@ class ChunkWriter:
 
 def dataset_card(summary, curlie):
     """Write a data card that explains the page-grouped compressed shard layout."""
+    if summary.get('label_contract') == 'gui_component_pack_input_v1':
+        return ('# Processed UI component dataset\n\n'
+                f"{summary['samples']} page groups, {summary['images']} full screenshots.\n\n"
+                '`metadata.jsonl` records page URLs and per-viewport image/label members in '
+                '`data/*.tar.gz`. Only accepted viewports are present; a page can have fewer '
+                'than three viewports. Each pair is `pages/<page>/<viewport>/full.png` and '
+                '`hierarchy.json` with schema `gui_processed_page_v1`. PNG bytes are unchanged.\n\n'
+                'Labels contain a compact component graph, usable crops and eligible split '
+                'supervision. Boxes use xyxy: nodes in whole-image coordinates; crop targets '
+                'and ignore regions in crop-local coordinates. Extract images with `crop_bbox`; '
+                'respect ignore regions and `split_supervision_eligible`. If present, consume only '
+                '`crops` with `detail_training_eligible=true`; coverage/pixel-discarded crops remain marked '
+                'for audit, without discarding sibling crops or full-page cut supervision. These are rule-generated '
+                'unverified labels. Final nodes retain true parent depth L1-L5 (layer 0..4), '
+                'without promoting deeper nodes. Existing fusion and cut coordinates are preserved. Keep page/site groups together '
+                'when splitting train/validation/test. Website screenshot rights remain separate '
+                'from metadata attribution.\n')
     derived = summary.get("hierarchy_policy") == "derived_clean_hierarchy"
     hierarchy_note = (
         "Hierarchy members in this package are the pipeline's postprocessed clean "
@@ -834,12 +854,16 @@ def pack_index(index_path, output, chunk_size_mb=1024, seed=42, require_url=Fals
 
     index_path = Path(index_path).resolve()
     index = load_index(index_path)
+    component_input = index.get('label_contract') == 'gui_component_pack_input_v1'
+    if component_input and index.get('final_layer_projection',{}).get('max_layers') != 5:
+        raise ValueError('Component packages require final L1-L5 labels; rerun prepare-pack with the current pipeline')
     index_hash = sha256_file(index_path)
     derived_root = (Path(index["hierarchies_root"]).resolve()
                     if index.get("hierarchies_root") else None)
     if derived_root is not None and not derived_root.is_dir():
         raise ValueError(f"Derived hierarchy root does not exist: {derived_root}")
-    run_roots = [(run["id"], Path(run["root"]).resolve()) for run in index["runs"]]
+    run_roots = [(run["id"], ((index_path.parent / run["root"]).resolve()
+                  if component_input else Path(run["root"]).resolve())) for run in index["runs"]]
     roots = [root for _, root in run_roots]
     output_path = Path(output).resolve()
     if output_path.exists() and any(output_path.iterdir()):
@@ -888,7 +912,8 @@ def pack_index(index_path, output, chunk_size_mb=1024, seed=42, require_url=Fals
         if run_id not in run_lookup:
             raise ValueError(f"Page references unknown run: {run_id}")
         root = run_lookup[run_id]
-        for viewport in required:
+        # Component filtering is per observation: keep the accepted siblings only.
+        for viewport in (sorted(page['viewports']) if component_input else required):
             record = page["viewports"].get(viewport)
             if record is None:
                 raise ValueError(f"Valid page {page.get('page_id')} lacks viewport {viewport}")
@@ -903,6 +928,17 @@ def pack_index(index_path, output, chunk_size_mb=1024, seed=42, require_url=Fals
             label = json.loads(hierarchy.read_text(encoding="utf-8"))
             if not isinstance(label, dict):
                 raise ValueError(f"Hierarchy must be a JSON object: {hierarchy}")
+            if component_input:
+                from scripts.offline_postprocess.domain import graph_depths
+                depths = graph_depths(label['nodes'])
+                if any(depth>=5 for depth in depths.values()) or any(
+                        n.get('layer')!=depths[n['node_id']] or n.get('derived_depth')!=depths[n['node_id']]
+                        for n in label['nodes']):
+                    raise ValueError(f'Component package contains nodes beyond true L5: {hierarchy}')
+                identifiers = {n['global_node_id'] for n in label['nodes']}
+                if any(t['global_node_id'] not in identifiers or t.get('layer',5)>=5
+                       for crop in label['crops'] for t in crop['targets']):
+                    raise ValueError(f'Deep or dangling crop positive in component package: {hierarchy}')
             capture = label.get("capture", {})
             name = capture.get("image", "initial.png") if isinstance(capture, dict) else None
             if name not in ("full.png", "initial.png") or Path(record["image"]).name != name:
@@ -938,6 +974,10 @@ def pack_index(index_path, output, chunk_size_mb=1024, seed=42, require_url=Fals
         raise ValueError("No valid pages in the pipeline index")
     any_derived = any(sample["hierarchy_side"] == "derived" for sample in samples)
     extra = {
+        'label_contract': index.get('label_contract'),
+        'detail_training_selection': index.get('detail_training_selection'),
+        'final_layer_projection': index.get('final_layer_projection'),
+        'detail_training_counts': index.get('detail_training_counts'),
         "pipeline_index": {
             "path": str(index_path),
             "sha256": index_hash,
@@ -946,7 +986,8 @@ def pack_index(index_path, output, chunk_size_mb=1024, seed=42, require_url=Fals
             "required_viewports": required,
             "skipped_pages": skipped_pages,
         },
-        "hierarchy_policy": ("derived_clean_hierarchy" if any_derived else "original_hierarchy_bytes"),
+        "hierarchy_policy": ('prepared_component_labels' if component_input else
+                             "derived_clean_hierarchy" if any_derived else "original_hierarchy_bytes"),
     }
     return _write_dataset(samples, input_stats, output, chunk_size_mb, seed,
                           dedupe_by, roots, extra_summary=extra, progress=progress,

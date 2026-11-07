@@ -1,0 +1,75 @@
+/** Verify the generated HTML from file://, including random sampling, crop flags and local PNG loading. */
+import assert from 'node:assert/strict';
+import {writeFile} from 'node:fs/promises';
+import {resolve} from 'node:path';
+import {pathToFileURL} from 'node:url';
+import {chromium} from 'playwright';
+
+const viewer=resolve(process.argv[2]||'outputs/dataset-viewer/index.html');
+let browser,context,page;
+const errors=[],requests=[];
+const report={passed:false,checks:[]};
+try {
+  browser=await chromium.launch({headless:true});
+  context=await browser.newContext({viewport:{width:1480,height:1060},acceptDownloads:true});
+  page=await context.newPage();
+  page.on('pageerror',error=>errors.push(error.message));
+  page.on('request',request=>{if(/^https?:/.test(request.url()))requests.push(request.url());});
+  await page.goto(pathToFileURL(viewer).href,{waitUntil:'load'});
+  const ready=async()=>{await page.waitForFunction(()=>!document.body.classList.contains('busy'),{timeout:60000});assert.equal(await page.locator('article').count()>0,true);};
+  const ids=()=>page.locator('article').evaluateAll(nodes=>nodes.map(node=>node.dataset.id));
+  await ready();
+  await page.locator('#layerStats summary').first().click();
+  assert.equal(await page.locator('#layerStatsContent table tr').count()>2,true);
+  const expectedUnique=await page.evaluate(()=>JSON.parse(document.getElementById('dataset').textContent).layer_statistics.totals.detail_training_unique_targets);
+  assert.equal(await page.locator('#layerStatsContent table').innerText().then(s=>s.includes(String(expectedUnique))),true);
+  assert.equal(await page.evaluate(()=>JSON.parse(document.getElementById('dataset').textContent).layer_statistics.layers.every(row=>row.derived_depth<5)),true);
+  await page.locator('#layerStats summary').first().click();
+  report.checks.push('per-layer unique/occurrence statistics are available in the unified viewer');
+  assert.equal(await page.locator('article').count(),5);
+  assert.equal(await page.getByText('此样本读取失败',{exact:false}).count(),0);
+  const first=await ids();
+  assert.equal(new Set(first.map(id=>id.slice(0,id.lastIndexOf('/')))).size,5);
+  assert.equal(await page.locator('canvas').count()>5,true);
+  report.checks.push('file:// opens with 5 complete original-image/crop displays and no server');
+  await page.screenshot({path:'outputs/dataset-viewer/preview.png'});
+  await page.locator('#random').click();await ready();
+  const second=await ids();assert.equal(second.some(id=>first.some(old=>old.slice(0,old.lastIndexOf('/'))===id.slice(0,id.lastIndexOf('/')))),false);
+  report.checks.push('random redraw avoids previously viewed original pages');
+  await page.locator('#noRepeat').uncheck();await page.locator('#seed').fill('42');
+  await page.locator('#random').click();await ready();const seeded=await ids();
+  await page.locator('#random').click();await ready();assert.deepEqual(await ids(),seeded);
+  report.checks.push('fixed seed reproduces viewport IDs');
+  const mixed=await page.evaluate(()=>JSON.parse(document.getElementById('dataset').textContent).catalogue.find(row=>row.status==='accepted'&&row.trainable>0&&row.discarded>0).id);
+  await page.locator('#search').fill(mixed);
+  await page.locator('#find').click();await ready();assert.deepEqual(await ids(),[mixed]);
+  assert.equal(await page.locator('.crop.discarded').count()>0,true);
+  assert.equal(await page.locator('.crop:not(.discarded)').count()>0,true);
+  await page.locator('#cropFilter').selectOption('discard');await ready();
+  assert.equal(await page.locator('.crop').count(),await page.locator('.crop.discarded').count());
+  await page.locator('#ignore').check();await ready();
+  await page.locator('#mode').selectOption('source');await ready();
+  await page.locator('.whole canvas').click();assert.equal(await page.locator('#zoom').isVisible(),true);
+  const nativeWidth=await page.evaluate(async id=>{const b=JSON.parse(document.getElementById('dataset').textContent),bytes=Uint8Array.from(atob(b.payloads[id]),c=>c.charCodeAt(0));return JSON.parse(await new Response(new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'))).text()).size.width;},mixed);
+  assert.equal(await page.locator('#zoomContent canvas').evaluate(node=>node.width),nativeWidth);
+  await page.locator('#closeZoom').click();
+  report.checks.push('ID search, kept/discarded siblings, source mode, ignore overlay and native-width zoom');
+  const downloadPromise=page.waitForEvent('download');await page.locator('#export').click();
+  const download=await downloadPromise;assert.equal(download.suggestedFilename(),'dataset-review-selection.json');
+  report.checks.push('current selection JSON can be downloaded');
+  await page.locator('#search').fill('');await page.locator('#status').selectOption('rejected');
+  await page.locator('#cropFilter').selectOption('all');await page.locator('#count').selectOption('1');
+  await page.locator('#random').click();await ready();
+  assert.equal(await page.locator('article').count(),1);
+  assert.equal(await page.locator('article .badges').first().innerText().then(s=>s.includes('质量拒绝')),true);
+  report.checks.push('quality-rejected observations are available for audit');
+  assert.deepEqual(errors,[]);assert.deepEqual(requests,[]);
+  assert.equal(await page.getByText('此样本读取失败',{exact:false}).count(),0);
+  report.passed=true;report.browser=browser.version();report.network_requests=requests;report.javascript_errors=errors;
+} catch(error) {
+  report.error=error.stack||String(error);process.exitCode=1;
+} finally {
+  if(page)await page.close();if(context)await context.close();if(browser)await browser.close();
+  await writeFile('outputs/dataset-viewer/browser-verification.json',JSON.stringify(report,null,2)+'\n');
+  console.log(JSON.stringify(report));
+}

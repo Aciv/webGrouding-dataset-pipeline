@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Index-first dataset pipeline: filter, postprocess, final filter and pack."""
+"""Current YAML dataset pipeline, with archived index/VLM/chunk commands for legacy data."""
 import argparse
 import faulthandler
 import json
@@ -11,6 +11,9 @@ from pathlib import Path
 SCRIPTS = Path(__file__).resolve().parents[1]
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
+PROJECT = SCRIPTS.parent
+if str(PROJECT) not in sys.path:
+    sys.path.insert(0, str(PROJECT))
 
 from pipeline import index as pipeline_index
 from pipeline.filter import filter_index
@@ -49,6 +52,139 @@ def add_viewports(parser):
 
 def emit(value):
     print(json.dumps(value, ensure_ascii=False), flush=True)
+
+
+def command_dataset(args):
+    """Run current staged processing, optionally export portable labels and compress page shards."""
+    from pipeline.components import run_component_pipeline
+    from pipeline.prepare import prepare_pack_input
+    from pipeline.detail_selection import select_detail_crops
+    from pipeline.layer_projection import project_final_layers
+    from hf_chunks.pack import pack_index
+    if args.pack_workers < 1 or not math.isfinite(args.chunk_size_mb) or args.chunk_size_mb <= 0:
+        raise ValueError('pack-workers and chunk-size-mb must be positive')
+    if not math.isfinite(args.min_detail_coverage) or not 0 <= args.min_detail_coverage <= 1:
+        raise ValueError('min-detail-coverage must be in [0,1]')
+    stop = args.stop_after
+    process_stop = stop if stop in ('filter', 'postprocess') else 'final-filter'
+    result = run_component_pipeline(args.input, args.workdir, args.config, args.resume,
+         args.limit_pages, args.baseline, args.workers, args.pixel_workers, args.page_ids,
+         stop_after=process_stop)
+    emit({'type': 'pipeline_stage', 'stage': process_stop,
+          'status': 'skipped' if result.get('resumed') else 'completed', **result})
+    if stop in ('filter', 'postprocess', 'final-filter'):
+        emit({'type': 'pipeline_stopped', 'stage': stop})
+        return
+    workdir = Path(args.workdir).resolve()
+    final_path = Path(result['final_index'])
+    layer_output = (Path(args.layer_output).resolve() if args.layer_output else
+                    _select_layer_output(workdir.with_name(workdir.name+'-final-l5'),final_path))
+    projected = project_final_layers(final_path,layer_output,resume=args.resume,workers=min(args.workers or 8,32))
+    emit({'type':'pipeline_stage','stage':'layer-filter',**projected})
+    final_path = Path(projected['final_index'])
+    if stop == 'layer-filter':
+        emit({'type':'pipeline_stopped','stage':stop,'output':str(final_path)})
+        return
+    detail_output = (Path(args.detail_output).resolve() if args.detail_output else
+                     _select_detail_output(workdir.with_name(workdir.name+'-detail-selection'),
+                                           final_path, args.min_detail_coverage))
+    detail = select_detail_crops(final_path, detail_output, args.min_detail_coverage, resume=args.resume)
+    emit({'type':'pipeline_stage', 'stage':'detail-filter', **detail})
+    final_path = Path(detail['final_index'])
+    from scripts.offline_postprocess.layer_statistics import compute_layer_statistics
+    layer_report = detail_output/'reports/layer-statistics.json'
+    cached_layers = json.loads(layer_report.read_text()) if layer_report.is_file() else {}
+    if cached_layers.get('source_index_sha256') != pipeline_index.sha256_file(final_path):
+        compute_layer_statistics(final_path,workers=args.workers or 8)
+    if stop == 'detail-filter':
+        emit({'type':'pipeline_stopped', 'stage':stop, 'output':str(final_path)})
+        return
+    prepared = (Path(args.prepare_output).resolve() if args.prepare_output else
+                _select_prepare_output(workdir.with_name(workdir.name+'-pack-input'), final_path))
+    prepared_result = prepare_pack_input(final_path, prepared, args.workers or 8, resume=args.resume)
+    emit({'type': 'pipeline_stage', 'stage': 'prepare-pack', **prepared_result})
+    if stop == 'prepare-pack':
+        emit({'type': 'pipeline_stopped', 'stage': stop, 'output': prepared_result['pack_index']})
+        return
+    pack_index_path = Path(prepared_result['pack_index'])
+    chunks = (Path(args.pack_output).resolve() if args.pack_output else
+              _select_pack_output(workdir.with_name(workdir.name+'-chunks'),
+                                  pack_index_path, args, args.pack_workers)[0])
+    emit(pack_index(pack_index_path, chunks, chunk_size_mb=args.chunk_size_mb,
+                    seed=args.seed, require_url=True, dedupe_by=args.dedupe_by,
+                    resume=args.resume, progress=True, workers=args.pack_workers))
+    emit({'type': 'pipeline_stopped', 'stage': 'pack', 'output': str(chunks)})
+
+
+def _select_detail_output(base, final_path, threshold):
+    """Find the matching crop-only policy or an unused sibling without overwriting older selections."""
+    from pipeline.detail_selection import RULE
+    digest = pipeline_index.sha256_file(final_path)
+    free = None
+    for candidate in [base]+[base.with_name(f'{base.name}-{n}') for n in range(2,1000)]:
+        if not candidate.exists() or not any(candidate.iterdir()):
+            free = free or candidate
+            continue
+        path = candidate/'index-final.json'
+        if path.is_file():
+            policy = json.loads(path.read_text()).get('detail_training_selection',{})
+            if (policy.get('source_index_sha256') == digest and policy.get('minimum_target_union_coverage') == threshold
+                    and policy.get('rule_version') == RULE):
+                return candidate
+    if free is None:
+        raise ValueError('No free detail-selection output; pass --detail-output')
+    return free
+
+
+def _select_layer_output(base, final_path):
+    """Reuse the exact L5 projection parent or choose a fresh sibling directory."""
+    digest = pipeline_index.sha256_file(final_path)
+    free = None
+    for candidate in [base]+[base.with_name(f'{base.name}-{n}') for n in range(2,1000)]:
+        if not candidate.exists() or not any(candidate.iterdir()):
+            free=free or candidate
+            continue
+        path=candidate/'index-final.json'
+        if path.is_file() and json.loads(path.read_text()).get('final_layer_projection',{}).get('source_index_sha256')==digest:
+            return candidate
+    if free is None:raise ValueError('No free final-layer output; pass --layer-output')
+    return free
+
+
+def command_project_layers(args):
+    """Keep actual L1-L5 graph/crop labels after fusion without changing cuts or source captures."""
+    from pipeline.layer_projection import project_final_layers
+    emit(project_final_layers(args.index,args.output,args.resume,args.workers))
+
+
+def command_select_detail(args):
+    """Flag low-coverage xyxy crops for detail training only; retain observation and split records."""
+    from pipeline.detail_selection import select_detail_crops
+    emit(select_detail_crops(args.index, args.output, args.min_coverage, args.resume))
+
+
+def _select_prepare_output(base, final_path):
+    """Reuse an export of the same source index, otherwise choose an unused sibling."""
+    digest = pipeline_index.sha256_file(final_path)
+    free = None
+    for candidate in [base] + [base.with_name(f'{base.name}-{n}') for n in range(2, 1000)]:
+        if not candidate.exists() or not any(candidate.iterdir()):
+            free = free or candidate
+            continue
+        manifest = candidate/'manifest.json'
+        if manifest.is_file() and (candidate/'pack-index.json').is_file():
+            value = json.loads(manifest.read_text())
+            if value.get('status') == 'completed' and value.get('source_index_sha256') == digest:
+                return candidate
+    if free is None:
+        raise ValueError('No free prepared output; pass --prepare-output')
+    return free
+
+
+def command_prepare(args):
+    """Export accepted component pages as portable image/URL/compact-label packing input."""
+    from pipeline.prepare import prepare_pack_input
+    emit(prepare_pack_input(args.index, args.output, args.workers, resume=args.resume))
 
 
 def command_filter(args):
@@ -160,11 +296,24 @@ def _select_pack_output(base, final_path, args, workers):
 
 
 def command_run(args):
-    """Run filter -> postprocess -> final filter -> pack under one work directory.
+    """Dispatch current YAML processing through packing, or explicitly selected legacy VLM stages.
 
-    ``--resume`` reuses completed stages, retries failed VLM observations, and skips
-    packaging when the final index and chunk options already match.
+    ``--resume`` validates checkpoints and skips matching completed output. Component
+    export/packing preserve page groups and whole-image/crop-local xyxy coordinates.
     """
+    if getattr(args, 'engine', 'legacy') == 'components':
+        if len(args.input) != 1:
+            raise ValueError('The component pipeline currently accepts one --input root')
+        args.input = args.input[0]
+        args.limit_pages = args.limit
+        args.dedupe_by = args.dedupe_by or 'none'
+        return command_dataset(args)
+    args.dedupe_by = args.dedupe_by or 'url'
+    args.workers = args.workers or 8
+    if args.stop_after in ('layer-filter', 'detail-filter', 'prepare-pack'):
+        raise ValueError('layer-filter/detail-filter/prepare-pack are component stages; use --engine components')
+    if not args.config:
+        raise ValueError('Legacy engine requires an explicit JSON --config')
     from pipeline.postprocess import run_index
     from hf_chunks.pack import pack_index
 
@@ -293,8 +442,52 @@ def command_run(args):
 def build_parser():
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
+    dataset = subparsers.add_parser('dataset', help='Current YAML pipeline: pre-filter -> components/slices -> final-filter -> validated index')
+    dataset.add_argument('--input', required=True, type=Path)
+    dataset.add_argument('--workdir', required=True, type=Path)
+    dataset.add_argument('--config', type=Path)
+    dataset.add_argument('--baseline', type=Path)
+    dataset.add_argument('--resume', action='store_true')
+    dataset.add_argument('--limit-pages', type=int, default=0)
+    dataset.add_argument('--page-ids', nargs='+')
+    dataset.add_argument('--workers', type=int)
+    dataset.add_argument('--pixel-workers', type=int)
+    dataset.add_argument('--stop-after', choices=('filter', 'postprocess', 'final-filter', 'layer-filter', 'detail-filter', 'prepare-pack', 'pack'),
+                         default='detail-filter')
+    dataset.add_argument('--prepare-output', type=Path)
+    dataset.add_argument('--detail-output', type=Path)
+    dataset.add_argument('--layer-output', type=Path)
+    dataset.add_argument('--min-detail-coverage', type=float, default=0.2)
+    dataset.add_argument('--pack-output', type=Path)
+    dataset.add_argument('--pack-workers', type=int, default=8)
+    dataset.add_argument('--chunk-size-mb', type=float, default=1024)
+    dataset.add_argument('--dedupe-by', choices=('url', 'site', 'none'), default='none')
+    dataset.add_argument('--seed', type=int, default=42)
+    dataset.set_defaults(require_url=True)
+    dataset.set_defaults(func=command_dataset)
 
-    filtering = subparsers.add_parser("filter", help="Build/filter an index from original runs")
+    layers = subparsers.add_parser('project-layers',help='Publish true final L1-L5 graph and crop labels after fusion/slicing')
+    layers.add_argument('--index',required=True,type=Path)
+    layers.add_argument('--output',required=True,type=Path)
+    layers.add_argument('--workers',type=int,default=8)
+    layers.add_argument('--resume',action='store_true')
+    layers.set_defaults(func=command_project_layers)
+
+    detail = subparsers.add_parser('select-detail-crops', help='Flag low-union-coverage crops for detail training only')
+    detail.add_argument('--index', required=True, type=Path)
+    detail.add_argument('--output', required=True, type=Path)
+    detail.add_argument('--min-coverage', type=float, default=0.2)
+    detail.add_argument('--resume', action='store_true')
+    detail.set_defaults(func=command_select_detail)
+
+    prepare = subparsers.add_parser('prepare-pack', help='Export compact accepted page/image/URL/labels for packing')
+    prepare.add_argument('--index', required=True, type=Path)
+    prepare.add_argument('--output', required=True, type=Path)
+    prepare.add_argument('--workers', type=int, default=8)
+    prepare.add_argument('--resume', action='store_true')
+    prepare.set_defaults(func=command_prepare)
+
+    filtering = subparsers.add_parser("filter", help="Legacy geometry-only index filter; current staged pipeline: dataset")
     source = filtering.add_mutually_exclusive_group(required=True)
     source.add_argument("--input", nargs="+", type=Path, help="One or more original collection roots")
     source.add_argument("--index", type=Path, help="Existing pipeline index to re-filter")
@@ -305,7 +498,7 @@ def build_parser():
     add_rules_arguments(filtering)
     filtering.set_defaults(func=command_filter)
 
-    final = subparsers.add_parser("final-filter", help="Validate derived hierarchies")
+    final = subparsers.add_parser("final-filter", help="Legacy derived-hierarchy filter")
     final.add_argument("--index", required=True, type=Path)
     final.add_argument("--output", required=True, type=Path)
     final.add_argument("--overwrite", action="store_true",
@@ -317,7 +510,7 @@ def build_parser():
     add_rules_arguments(final)
     final.set_defaults(func=command_final_filter)
 
-    post = subparsers.add_parser("postprocess", help="Create a derived hierarchy version")
+    post = subparsers.add_parser("postprocess", help="Legacy VLM/five-layer hierarchy processing")
     post.add_argument("--index", required=True, type=Path)
     post.add_argument("--index-output", required=True, type=Path)
     post.add_argument("--hierarchy-root", required=True, type=Path)
@@ -331,7 +524,7 @@ def build_parser():
     post.add_argument("--resume", action="store_true")
     post.set_defaults(func=command_postprocess)
 
-    packing = subparsers.add_parser("pack", help="Package an index into compressed chunks")
+    packing = subparsers.add_parser("pack", help="Package prepared component pages or legacy indexed pages")
     packing.add_argument("--index", required=True, type=Path)
     packing.add_argument("--output", required=True, type=Path)
     packing.add_argument("--chunk-size-mb", type=float, default=1024)
@@ -344,10 +537,18 @@ def build_parser():
                          help="Reuse a completed package with the same index and options")
     packing.set_defaults(func=command_pack)
 
-    run = subparsers.add_parser("run", help="Run filter, postprocess, final filter and pack")
+    run = subparsers.add_parser("run", help="Full component pipeline through compression; --engine legacy selects archived VLM processing")
+    run.add_argument('--engine', choices=('components', 'legacy'), default='components')
     run.add_argument("--input", nargs="+", required=True, type=Path)
     run.add_argument("--workdir", required=True, type=Path)
-    run.add_argument("--config", required=True, type=Path)
+    run.add_argument("--config", type=Path, help='Component YAML (default bundled); legacy engine requires JSON')
+    run.add_argument('--baseline', type=Path)
+    run.add_argument('--page-ids', nargs='+')
+    run.add_argument('--pixel-workers', type=int)
+    run.add_argument('--prepare-output', type=Path)
+    run.add_argument('--detail-output', type=Path)
+    run.add_argument('--layer-output', type=Path)
+    run.add_argument('--min-detail-coverage', type=float, default=0.2)
     run.add_argument("--pack-output", type=Path)
     run.add_argument("--limit", type=int, default=0)
     run.add_argument("--concurrency", "--vlm-concurrency", dest="concurrency", type=int,
@@ -356,18 +557,19 @@ def build_parser():
                      help="Override config pixels.pixel_concurrency (0 disables the separate bound)")
     run.add_argument("--resume", action="store_true")
     run.add_argument("--chunk-size-mb", type=float, default=1024)
-    run.add_argument("--dedupe-by", choices=("url", "site", "none"), default="url")
+    run.add_argument("--dedupe-by", choices=("url", "site", "none"), default=None)
     run.add_argument("--seed", type=int, default=42)
     run.add_argument("--require-url", action="store_true")
-    run.add_argument("--pack-workers", type=int, default=1,
+    run.add_argument("--pack-workers", type=int, default=8,
                      help="Parallel shard writers for the packaging stage")
-    run.add_argument("--stop-after", choices=("filter", "postprocess", "final-filter", "pack"),
+    run.add_argument("--stop-after", choices=("filter", "postprocess", "final-filter", "layer-filter", "detail-filter", "prepare-pack", "pack"),
                      default="pack", help="Stop after this completed stage; resume later with --resume")
     run.add_argument("--final-layout-overflow-policy", choices=("reject", "warn", "ignore"),
                      default="warn",
                      help="Layout overflow policy for the final filter (default warn)")
     add_viewports(run)
     add_rules_arguments(run)
+    run.set_defaults(workers=None)
     run.set_defaults(func=command_run)
     return parser
 

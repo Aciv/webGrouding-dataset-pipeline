@@ -1,3 +1,136 @@
+# 当前数据集 Pipeline
+
+## 总体运行与分阶段停止
+
+`run` 默认使用当前组件处理引擎，顺序为：
+`filter → postprocess → final-filter → layer-filter → detail-filter → prepare-pack → pack`。
+默认跑到压缩包，`--stop-after` 可取上述任一阶段。
+
+```bash
+# 先完成筛选与后处理，停在裁片后筛之前
+python3 scripts/pipeline/cli.py run \
+  --input datasets/curlie-full-10k \
+  --workdir outputs/my-components \
+  --config scripts/offline_postprocess/config.yaml \
+  --workers 12 --pixel-workers 4 --pack-workers 8 \
+  --stop-after postprocess
+
+# 继续到最终压缩包
+python3 scripts/pipeline/cli.py run \
+  --input datasets/curlie-full-10k \
+  --workdir outputs/my-components \
+  --config scripts/offline_postprocess/config.yaml \
+  --workers 12 --pixel-workers 4 --pack-workers 8 \
+  --stop-after pack --resume
+```
+
+| 停止点 | 已完成内容 |
+|---|---|
+| `filter` | 原始质量、范围、像素预筛；不清框、不切片 |
+| `postprocess` | 清框、分组、切片候选；不执行裁片后筛，不发布 trainable 数据 |
+| `final-filter` | 裁片后筛、统计、独立校验和最终索引 |
+| `layer-filter` | 融合与切片后只保留真实L1–L5，删除深层节点和裁片引用，不提升层级 |
+| `detail-filter` | 按目标框并集覆盖率标记细节训练资格，不改变视口质量或整页切线监督 |
+| `prepare-pack` | 通过视口的独立 PNG + 精简 JSON、URL 和打包索引 |
+| `pack` | tar.gz 分片、metadata.jsonl 和 manifest.json |
+
+同阶段的匹配检查点会复用，继续到后续处理阶段时重新检查来源并生成所需阶段结果。
+输入目录、所选页面、规则版本、YAML 和工作并发参数必须一致；源文件变化会使缓存失效。
+已完成的导出会验证文件哈希，已完成的压缩包按索引和压缩选项复用。
+默认导出和压缩目录分别为 workdir 的兄弟目录 `<workdir>-pack-input`、`<workdir>-chunks`，
+变化后自动选择 `-2` 等新目录，已有成品不覆盖。可用 `--prepare-output`、`--pack-output` 指定。
+当前组件引擎接收一个输入根，筛选参数使用 YAML；旧 VLM/多输入模式须显式 `--engine legacy`。
+`dataset` 支持这七个停止点，默认停在 `detail-filter`，得到已限L5并重算细节资格的最终索引。`final-filter` 是未截层的生成检查点，不可直接当成最终训练标注。
+
+### 细节裁片训练选择
+
+`run` 默认 `--min-detail-coverage 0.2`。所有可训练目标框（跨层）的并集面积占实际裁片
+面积低于20%时，仅该裁片退出细节训练。重叠不重复计数，ignore与已剔除包装框不计入。
+恰好20%保留；`--min-detail-coverage 0`仅关闭覆盖率门槛，像素有效性检测仍然生效。
+低覆盖率不改变整页accepted状态、其他裁片、原图或切线标签；即使没有可用细节裁片，
+视口仍保留供整页任务使用。严重页面质量检查和空白裁片拒绝仍按原有质量策略执行。
+
+L5投影默认写在 `<workdir>-final-l5/`（可用 `--layer-output` 指定）；覆盖率选择结果默认写在 `<workdir>-detail-selection/`，可用 `--detail-output` 指定。
+读取该目录的 `index-final.json`：`detection_crops` 仅引用可训练裁片，
+`detail_crop_manifest` 包含所有原合格裁片及其标记，`discarded_detail_crops`单列被抛弃裁片。
+原始生成索引/对象图/整页切线文件不改写，新的选择索引引用其独立几何校验报告。
+
+成品每页JSON的 `crops` 保留全部候选及 `target_union_coverage`、
+`detail_training_eligible`、`detail_training_discarded`、`detail_training_reason_codes`。
+细节训练只读取 `detail_training_eligible=true` 或 `detail_training_crop_ids`；
+`discarded_detail_crop_ids`用于审计，不能把“细节训练抛弃”理解为“整页质量失败”。
+整页任务继续读取 `split_label` 和 `split_supervision_eligible`。
+
+当前v4恢复历史横向严重溢出的拒绝策略：≥5个问题框且占比≥20%，
+问题layout须横向超2px、丢失宽度≥10%。保持逐视口筛选与少框可保留，
+仍执行空白裁片后筛。v3的warn策略产物仅作历史基线；版本与配置已变，不能续用旧缓存。
+
+当前入口将 `page_filter` 的处理前预筛与裁片后质量检查接到同一条无VLM流水线：
+
+```bash
+python3 scripts/pipeline/cli.py dataset \
+  --input datasets/curlie-full-10k \
+  --workdir outputs/postprocess-components-v4 \
+  --config scripts/offline_postprocess/config.yaml \
+  --baseline outputs/postprocess-components-v3 \
+  --workers 12 --pixel-workers 4
+```
+
+顺序为任务范围/视口预筛 → 框整理 → 局部分解 → 长图切片 → 裁片像素及几何质量检查 →
+统计和独立校验 → `index-final.json`。一个YAML贯穿所有阶段；`--resume` 要求来源、版本和配置一致。
+
+- `index-filtered.json`：逐视口预筛状态和原始文件指纹，正常少框页面不因旧min_boxes=10被误删。
+- `index-postprocessed.json`：派生对象图指纹、处理状态及裁片候选数。
+- `index-final.json`：校验通过后才发布，记录每视口最终状态和检测/切线资格，引用已通过的清单。
+- `reports/filter-summary.json` / `.md`、`blank-crops.jsonl`：前后两阶段原因、触发裁片和被连带剔除的全部裁片数量。
+
+任一实际裁片或核心区域命中空白/纯色，整个视口及其全部检测裁片、切线标签退出发布，
+原始文件和失败裁片证据保留；同页其他正常视口仍独立保留。这是用户确认的严格策略。
+第一阶段记录几何/layout代理证据，**不声称验证了CSS responsiveness**，未知仍为unknown。
+
+当前中间索引schema为 `gui_component_dataset_index_v1`，坐标为原图CSS xyxy；先导出精简打包输入，不直接交给旧五层加载器。
+
+### 最终打包输入
+
+```bash
+python3 scripts/pipeline/cli.py project-layers \
+  --index outputs/postprocess-components-v4/index-final.json \
+  --output outputs/postprocess-components-v4-final-l5 --workers 8
+
+python3 scripts/pipeline/cli.py select-detail-crops \
+  --index outputs/postprocess-components-v4-final-l5/index-final.json \
+  --output outputs/detail-selection-components-v4-l5-20 --min-coverage 0.2
+
+python3 scripts/pipeline/cli.py prepare-pack \
+  --index outputs/detail-selection-components-v4-l5-20/index-final.json \
+  --output outputs/pack-input-components-v4-l5-detail20 --workers 8
+```
+
+`pages/<page>/<viewport>/` 只包含原始 `full.png` 和精简 `hierarchy.json`。
+JSON 包含 URL、对象图、可用裁片的 targets/ignore_regions、符合资格的切线标签；
+不包含操作日志、像素诊断、源 DOM selector 或原始绝对路径。裁片图片按 `crop_bbox` 获取。
+整页对象坐标和裁片局部坐标均为 xyxy；不可把裁片局部框直接画到整页。
+拒绝和待审视口不导出，同页其余通过的视口保留。原始 PNG 按字节复制并校验 SHA-256。
+输出必须是独立空目录，`pack-index.json` 最后发布，整个目录可以移动后再打包。
+
+后续打包直接使用下列输入（`--dedupe-by none` 保持本次筛选结果数量）：
+
+```bash
+python3 scripts/pipeline/cli.py pack \
+  --index outputs/pack-input-components-v4-l5-detail20/pack-index.json \
+  --output outputs/chunks-components-v4-l5-detail20 \
+  --chunk-size-mb 1024 --dedupe-by none --require-url --workers 8
+```
+
+`pack` 识别 `gui_component_pack_input_v1` 标签契约，不对新标签再做旧版层深筛选；
+同页已接受的视口在同一分片、同一条 metadata 记录中。单独 `prepare-pack` 不压缩；`run` 默认继续压缩，不执行上传。
+下游检测训练器接入和切线模型训练仍是独立工作。
+
+---
+
+以下是历史v13流水线说明；`filter/postprocess/final-filter` 与 `run --engine legacy` 保留用于旧数据兼容，
+不属于当前组件/裁片数据入口，v13结果已废弃。
+
 # 索引式离线 Pipeline：filter → postprocess → final filter → chunks
 
 四个阶段只通过一个版本化 JSON 索引交接。**原始采集目录只读**：filter、final filter 和打包都不改文件；postprocess 只在独立目录新增一版 clean hierarchy。截图、URL、入口和分类始终从原始 run 与原始索引解析。
@@ -76,7 +209,7 @@ python3 scripts/pipeline/cli.py pack \
 ## 一步跑完
 
 ```bash
-python3 scripts/pipeline/cli.py run \
+python3 scripts/pipeline/cli.py run --engine legacy \
   --input runs/curlie-full-10k runs/curlie-homepage-10k \
   --workdir runs/pipe-run \
   --config scripts/layer_postprocess/config.local.json \
@@ -91,7 +224,7 @@ python3 scripts/pipeline/cli.py run \
 
 ```bash
 # 只做 filter + postprocess，然后退出
-python3 scripts/pipeline/cli.py run \
+python3 scripts/pipeline/cli.py run --engine legacy \
   --input runs/a runs/b \
   --workdir runs/pipe-run \
   --config scripts/layer_postprocess/config.local.json \
@@ -99,7 +232,7 @@ python3 scripts/pipeline/cli.py run \
   --stop-after postprocess
 
 # 之后继续 final-filter + pack；已完成的阶段自动跳过
-python3 scripts/pipeline/cli.py run \
+python3 scripts/pipeline/cli.py run --engine legacy \
   --input runs/a runs/b \
   --workdir runs/pipe-run \
   --config scripts/layer_postprocess/config.local.json \
@@ -124,7 +257,7 @@ python3 scripts/pipeline/cli.py run \
 示例（10k 级）：
 
 ```bash
-python3 scripts/pipeline/cli.py run \
+python3 scripts/pipeline/cli.py run --engine legacy \
   --input runs/a runs/b \
   --workdir runs/pipe-run \
   --config scripts/layer_postprocess/config.local.json \
@@ -165,7 +298,7 @@ postprocess 每 30 秒会输出一次带 `in_flight` 的心跳，即使没有 ob
 `run --resume` 的实际用法：
 
 ```bash
-python3 scripts/pipeline/cli.py run \
+python3 scripts/pipeline/cli.py run --engine legacy \
   --input runs/a runs/b \
   --workdir runs/pipe-run \
   --config scripts/layer_postprocess/config.local.json \
@@ -240,3 +373,16 @@ python3 -m unittest discover -s scripts/pipeline -p 'test_*.py' -v
 ```
 
 测试覆盖多原始目录、整页拒绝、必需 viewport、图片尺寸、派生 hierarchy、最终筛、哈希漂移、索引打包和 CLI。原有 `page_filter`、`layer_postprocess`、`webdataset`、`hf_chunks` 的测试保持通过。
+
+### 裁片内纯色框检测
+
+`detail-filter` 同时读取原始截图，对最终 L1–L5 正样本框逐框取 RGB 像素。
+每个通道的最大值与最小值之差均不超过4（8-bit RGB）视作纯色/近纯色；
+纯色框数量占该裁片全部正样本框数量 **≥60%** 时，仅标记该裁片无效。
+重叠框按框分别计数；ignore不计数；没有正样本框时该检测不作判断。
+这是一条像素启发式规则，不证明内容未加载或不可见，也不检测所有噪声。
+
+输出保留裁片几何 `status`，增加 `crop_pixel_valid`、`box_pixel_evidence`
+（分母、纯色数量、比例及对应框ID），训练资格为覆盖率与像素检查同时通过。
+失败原因是 `mostly_uninformative_target_boxes`；训练manifest与打包JSON均携带标记。
+该规则不连带拒绝其他裁片、整页或切线监督。旧结果不覆盖；默认pipeline缓存按规则版本区分。

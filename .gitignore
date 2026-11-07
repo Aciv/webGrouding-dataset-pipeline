@@ -11,3 +11,7 @@ examples/
 .env.*
 !.env.example
 docs/
+
+/datasets/
+
+/outputs/

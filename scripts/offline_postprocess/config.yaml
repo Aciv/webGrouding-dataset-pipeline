@@ -1,0 +1,123 @@
+workers: 12
+pixel_workers: 4
+quality:
+  confirmed_dense_pages:
+  - curlie-00322976-p002
+  suspect_observations:
+  - curlie-00360564-p001/desktop
+  - curlie-00360564-p001/mobile
+  - curlie-00360564-p001/tablet
+  review_unconfirmed_error_page_peers: true
+  confirmed_error_observations:
+    curlie-00525691/mobile:
+      reason: confirmed_domain_parking
+      image_sha256: 1b9f8cc7165788e092a32835a2c77a1c285a4181fc3de422fe9a4df6db48879b
+      basis: historical_filter_visual_audit_2026_11_07
+    curlie-00319614/desktop:
+      reason: confirmed_captcha
+      image_sha256: 01f75275446f88796e6296c6a363fbe34fd1ab3281e2be50d83039188f69ca4a
+      basis: visual_audit_2026_11_07
+    curlie-00319614/mobile:
+      reason: confirmed_captcha
+      image_sha256: 898cb004e82303ad1025475b9d010d8424ab934fa0275c266390197bf4245863
+      basis: visual_audit_2026_11_07
+    curlie-00319614/tablet:
+      reason: confirmed_captcha
+      image_sha256: 773f7affa562a520be71f7b60d0fd6f80e0f057f971ba64f2252bc80f443e2ab
+      basis: visual_audit_2026_11_07
+    curlie-00062587-p001/desktop:
+      reason: confirmed_service_error
+      image_sha256: df8009b1ace1328133e962d939a12f053ca552f3119a6741477a237746a5e3c2
+      basis: visual_audit_2026_11_07
+    curlie-00342576-p001/tablet:
+      reason: confirmed_application_error
+      image_sha256: 7ccfc90c37ac4f8d4b523d4465481fcca5004fb18328b451f4b1eda8b1e30831
+      basis: visual_audit_2026_11_07
+    curlie-00342576-p002/mobile:
+      reason: confirmed_application_error
+      image_sha256: bb5eaf256eb360296fe4e6b88fe10307e072e9f8aedf22bdaca328822036b09e
+      basis: visual_audit_2026_11_07
+    curlie-00466396/desktop:
+      reason: confirmed_access_denied
+      image_sha256: 44ba8cff732d937f8b9bd1453fb9f837e19ba55ca7ad137c383ba2b52a3eed28
+      basis: visual_audit_2026_11_07
+  dense_min_targets: 1000
+  dense_small_ratio: 0.65
+  dense_table_area_ratio: 0.45
+  geometry_tolerance_px: 2.0
+cleanup:
+  fine_text_height: 24
+  fine_link_height: 32
+  fine_width: 200
+  tiny_side: 20
+  group_min_members: 2
+  group_max_height: 700
+  group_gap: 24
+  wrapper_height_ratio: 0.45
+pre_filter:
+  enabled: true
+  min_outside_boxes: 5
+  max_outside_ratio: 0.2
+  tolerance_px: 2.0
+  min_layout_overflow_ratio: 0.1
+  layout_overflow_policy: reject
+blank_crop_filter:
+  enabled: true
+  check_core: true
+  scope: observation
+  max_color_range: 4
+  background_tolerance: 12
+  max_foreground_ratio: 0.0001
+  max_edge_ratio: 0.0002
+  edge_difference: 12
+local_regions:
+  enabled: true
+  min_height: 1000
+  min_members: 4
+  max_depth: 3
+  max_roots: 2
+  max_candidates_per_axis: 160
+  min_gap_px: 8
+  min_part_members: 2
+slicing:
+  trigger_height_gt: 2700
+  min_height: 900
+  max_height: 1800
+  target_height: 1350
+  max_targets: 384
+  context_px: 96
+  candidate_step: 30
+  materialize_crops: false
+  critical_replan_heights:
+  - 1100
+  - 900
+pixels:
+  analysis_width: 256
+  rgb_analysis_width: 512
+  pixel_variance_threshold: 50
+  pixel_difference_threshold: 45
+  pixel_difference_portion: 0.9
+  pixel_window_px: 24
+  max_decoded_pixels: 60000000
+split_supervision:
+  include_fallback: false
+  allow_component_boundary_loss: true
+  max_missing_component_targets: 16
+  max_missing_component_ratio: 0.1
+  max_input_height: 2048
+  max_input_width: 384
+statistics:
+  width_buckets:
+  - 480
+  - 900
+  - 1200
+  - 1600
+  iou_edges:
+  - 0
+  - 0.1
+  - 0.25
+  - 0.5
+  - 0.75
+  - 0.9
+  - 0.95
+  - 1.0
