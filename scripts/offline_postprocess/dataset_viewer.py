@@ -15,6 +15,8 @@ def build_dataset_viewer(index_path, output, workers=8):
     """Embed lazy per-viewport annotations in HTML; reference source PNGs with relative file URLs.
 
     Whole-page/source boxes are original-image xyxy; crop targets/ignores are crop-local.
+    Detection targets carry their final L1-L5 layer; the HTML can show one layer or any
+    combination and restricts random sampling to observations containing a chosen layer.
     No source labels/images or published training manifests are modified. This file
     opens directly without a web server, network calls or browser filesystem grants.
     """
@@ -58,20 +60,34 @@ def build_dataset_viewer(index_path, output, workers=8):
                 if node.get('disposition') == 'detection':
                     x,y,w,h = node['bbox']
                     source_boxes.append(compact([x,y,x+w,y+h],node.get('node_id',''),node.get('struct','')))
-            final_boxes = [compact(n['bbox'],n['global_node_id'],f"L{n.get('derived_depth',0)+1} "+str(n.get('struct')or'')+'/'+str(n.get('subtype')or''))
+            def node_layer(node):
+                depth = node.get('derived_depth')
+                if depth is None:
+                    depth = node.get('layer', 0)
+                return int(depth)+1
+            node_layers = {n['global_node_id']:node_layer(n) for n in graph['nodes'] if n.get('detection_eligible')}
+            def target_label(target):
+                layer = node_layers.get(target['global_node_id'])
+                return (f'L{layer} ' if layer else '')+str(target.get('struct')or'')+'/'+str(target.get('subtype')or'')
+            final_boxes = [compact(n['bbox'],n['global_node_id'],f"L{node_layers[n['global_node_id']]} "+str(n.get('struct')or'')+'/'+str(n.get('subtype')or''))
                            for n in graph['nodes'] if n.get('detection_eligible')]
+            layer_counts = defaultdict(int)
+            for layer in node_layers.values():
+                layer_counts[layer] += 1
             crops = []
             for crop in audit['crops']:
                 flags = selected[oid].get(crop['crop_id'],{})
                 eligible = observation['status']=='accepted' and crop['status']=='accepted' and flags.get('detail_training_eligible',True)
                 crops.append({'id':crop['crop_id'], 'box':crop['crop_bbox'], 'core':crop['core_bbox'],
-                    'targets':[compact(t['bbox'],t['global_node_id'],str(t.get('struct')or'')+'/'+str(t.get('subtype')or'')) for t in crop['targets']],
+                    'targets':[compact(t['bbox'],t['global_node_id'],target_label(t)) for t in crop['targets']],
                     'ignores':[compact(t['bbox'],t.get('global_node_id',''),t.get('reason','')) for t in crop['ignore_regions']],
                     'eligible':eligible, 'discarded':flags.get('detail_training_discarded',False),
                     'coverage':flags.get('target_union_coverage'), 'pixels':flags.get('box_pixel_evidence'),
                     'reasons':flags.get('detail_training_reason_codes') or crop.get('reason_codes',[]),
                     'geometry_status':crop['status']})
             entry['candidate_crops'] = len(crops)
+            entry['layers'] = sorted(layer_counts)
+            entry['layer_counts'] = {str(layer):layer_counts[layer] for layer in sorted(layer_counts)}
             image = quote(os.path.relpath(observation['source_image'],output.parent),safe='/')
             data = {'image':image, 'size':observation['original_size'], 'source':source_boxes,
                     'final':final_boxes, 'cuts':(audit.get('split_label') or {}).get('cut_lines_original_px',[]), 'crops':crops}

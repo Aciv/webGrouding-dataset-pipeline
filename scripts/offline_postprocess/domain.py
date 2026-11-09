@@ -2,7 +2,7 @@
 import math
 from copy import deepcopy
 
-VERSION = 'component_slices_v4'
+VERSION = 'component_slices_v5'
 
 
 def xyxy(box):

@@ -6,6 +6,9 @@
 显示整页/源框/处理后框及全部裁片，可在页面内继续随机抽样，不必重新导图。
 支持质量状态、视口、细节抛弃状态筛选、ID/URL搜索、固定种子、名单导出和原像素放大。
 切换到“全部处理结果”可复核拒绝与待审项；低覆盖裁片有独立训练抛弃标记。
+工具栏“层级组合”可只勾选 L1–L5 中任意一层或任意组合：整页处理后框与裁片目标框
+同步过滤并按层着色（L1绿、L2蓝、L3橙、L4紫、L5青）；随机抽样的候选池也限制为
+至少包含所选层的视口。原始候选模式仍展示全部源框，不套用最终层过滤。
 
 数据更新后重新生成：
 
@@ -18,6 +21,23 @@ python3 -m scripts.offline_postprocess.cli viewer \
 HTML内置完整标注索引并按需解压，原PNG按相对路径引用；保持仓库目录结构即可直接双击，
 不需要HTTP服务器、外部CDN或网络。将HTML单独搬离仓库不会携带原始图片。
 真实Chromium验证见旁边的 `browser-verification.json`。
+
+## 文件夹选择版查看器
+
+直接打开 `scripts/offline_postprocess/dataset_viewer_picker.html`，不需要先生成HTML。
+页面只读取浏览器中手动选择的文件夹（`webkitdirectory` 或拖放），不上传、不联网、不需要HTTP服务。
+自动识别两种目录：
+
+- `pack-input-*/`：含 `pack-index.json`，自包含 `pages/` 原图与最终 `hierarchy.json`。一个文件夹即可查看最终数据；pack-input 不保留原始 source 标注，原始候选模式会明确显示不可用。
+- run 结果（含 validated `index-final.json`）：除结果文件夹外，还需要加入原始数据源文件夹（如 `datasets/curlie-full-10k`）以读取原图和原始 hierarchy。若索引里的 audit/hierarchy 指向另一个 run（例如 detail-selection 指向 final-l5），把那个 run 文件夹也加入即可。
+
+可以多次选择文件夹，文件会合并；检测到多个索引时页面顶部提供选择。层级信息在后台读取，
+期间可以先抽样，读取完成后层级组合过滤生效。文件缺失会逐项显示为读取失败并给出需要补选的目录，
+不会用其他文件顶替。测试：
+
+```bash
+node scripts/offline_postprocess/tests/test_dataset_viewer_picker.mjs
+```
 
 ## 每层统计
 
@@ -34,10 +54,10 @@ python3 -m scripts.offline_postprocess.cli layer-stats \
 原始层级为 `source-layer-statistics.csv`。仅统计质量通过的视口，跨视口不做对象合并。
 pipeline在detail-filter之后自动补齐此统计；生成查看器时也会按索引指纹检查并补齐。
 
-当前规则版本为 `component_slices_v4`。本入口替代旧 VLM／五层后处理。旧 v13 后处理结果已废弃，作为输入时明确拒绝。
+当前规则版本为 `component_slices_v5`。本入口替代旧 VLM／五层后处理。旧 v13 后处理结果已废弃，作为输入时明确拒绝。
 原始 DOM 候选标签也不是人工真值；所有输出标记 `rule_generated_unverified`。
 
-v4恢复历史横向layout严重溢出拦截（2px容差、10%宽度损失、至少5框且占比≥20%）。
+v5沿用v4的横向layout严重溢出拦截（2px容差、10%宽度损失、至少5框且占比≥20%）。
 仍按视口独立筛选，不因另一视口失败连带删除正常截图，不按少于10框一刀切。
 已确认域名停放截图加入哈希隔离；没有引入通用OCR或语义分类器。
 
@@ -77,7 +97,7 @@ python3 -m unittest discover -s scripts/offline_postprocess/tests -v
 
 H≤2700 保留整图；H>2700 用像素分隔与框布局的全局规划生成水平切线。
 核心分区完整无重叠，实际裁图可以添加上下文，但高度保持 900–1800。
-完整目标可能在上下文中重复；残片是 ignore，不是截断后的新目标。
+完整目标可能在上下文中重复；被裁片边界截断的目标保留为 partial 正样本，框为裁剪后的可见框；只有源 ignore 仍是 ignore。
 384 容量冲突进入 review，不截断目标。短页不为凑高度拉伸。
 
 ## 产物与消费
@@ -162,7 +182,7 @@ python3 -m scripts.offline_postprocess.cli gallery \
 
 ## v3统一filter/pipeline入口
 
-当前规则版本为 `component_slices_v4`。推荐使用 `scripts/pipeline/cli.py dataset`，
+当前规则版本为 `component_slices_v5`。推荐使用 `scripts/pipeline/cli.py dataset`，
 详见 `scripts/pipeline/README.md`。它发布pre-filter、postprocessed、final三份索引，
 其中最终索引必须通过独立校验。v1/v2运行记录仅作历史比较。
 

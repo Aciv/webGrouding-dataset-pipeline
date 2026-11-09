@@ -4,10 +4,11 @@ from copy import deepcopy
 from concurrent.futures import ThreadPoolExecutor
 import json
 from pathlib import Path
-from scripts.offline_postprocess.domain import graph_depths
+from scripts.offline_postprocess.domain import VERSION, graph_depths
 from scripts.offline_postprocess.infrastructure import read_jsonl, write_json, write_jsonl, sha256_file
 
 RULE = 'final_component_layers_v1'
+GRAPH_RULE = f'{VERSION}_final_l5'
 
 
 def truncate_graph(graph, max_layers=5):
@@ -22,7 +23,7 @@ def truncate_graph(graph, max_layers=5):
         if node.get('represented_by') and node['represented_by'] not in identifiers:
             node.pop('represented_by')
     result = {**graph, 'nodes':kept, 'detection_target_ids':[n['global_node_id'] for n in kept if n.get('detection_eligible')]}
-    result['rule_version'] = 'component_slices_v4_final_l5'
+    result['rule_version'] = GRAPH_RULE
     counts = {'nodes_before':len(graph['nodes']), 'nodes_after':len(kept),
               'detection_targets_before':sum(bool(n.get('detection_eligible')) for n in graph['nodes']),
               'detection_targets_after':len(result['detection_target_ids'])}
@@ -125,7 +126,7 @@ def project_final_layers(index_path, output, resume=False, workers=8):
                         raise ValueError('Dangling final target reference')
         write_json(folder/'result.json',result)
         record['audit']=str(folder/'result.json')
-        record['rule_version']='component_slices_v4_final_l5'
+        record['rule_version']=GRAPH_RULE
         for key in ('detail_crop_candidates','discarded_detail_crops'):record.pop(key,None)
         return record,selected,counts
 
@@ -142,7 +143,7 @@ def project_final_layers(index_path, output, resume=False, workers=8):
     write_json(output/'reports/validation.json',{'passed':True,'scope':'final_layer_projection',
                'source_validation':source['artifacts']['validation'],'observations_checked':len(observations),
                'max_derived_depth':4,'dangling_positive_references':0})
-    index = {**source,'rule_version':'component_slices_v4_final_l5','observations':observations,
+    index = {**source,'rule_version':GRAPH_RULE,'observations':observations,
              'final_layer_projection':policy,'parent':{'path':str(index_path),'sha256':policy['source_index_sha256']},
              'artifacts':dict(source['artifacts'])}
     index.pop('detail_training_selection',None)

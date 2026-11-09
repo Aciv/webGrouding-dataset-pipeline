@@ -40,7 +40,26 @@ try {
   await page.locator('#random').click();await ready();const seeded=await ids();
   await page.locator('#random').click();await ready();assert.deepEqual(await ids(),seeded);
   report.checks.push('fixed seed reproduces viewport IDs');
-  const mixed=await page.evaluate(()=>JSON.parse(document.getElementById('dataset').textContent).catalogue.find(row=>row.status==='accepted'&&row.trainable>0&&row.discarded>0).id);
+  const mixed=await page.evaluate(()=>JSON.parse(document.getElementById('dataset').textContent).catalogue.find(row=>row.status==='accepted'&&row.trainable>0&&row.discarded>0&&['1','2','4','5'].every(layer=>row.layer_counts?.[layer])).id);
+  const layerCounts=await page.evaluate(id=>JSON.parse(document.getElementById('dataset').textContent).catalogue.find(row=>row.id===id).layer_counts,mixed);
+  const setLayers=async values=>{
+    await page.evaluate(values=>{for(const input of document.querySelectorAll('#layers input'))input.checked=values.includes(Number(input.value));document.querySelector('#layers input').dispatchEvent(new Event('change',{bubbles:true}));},values);
+    await ready();
+  };
+  assert.equal(await page.locator('#layers input').count(),5);
+  assert.equal(await page.locator('#layers input:checked').count(),5);
+  await page.locator('#search').fill(mixed);await page.locator('#find').click();await ready();
+  await setLayers([1]);
+  assert.equal(await page.locator('article').first().getAttribute('data-whole-boxes'),String(layerCounts['1']));
+  await setLayers([2,4]);
+  assert.equal(await page.locator('article').first().getAttribute('data-whole-boxes'),String(Number(layerCounts['2'])+Number(layerCounts['4'])));
+  await page.locator('#layerAll').click();await ready();
+  assert.equal(await page.locator('article').first().getAttribute('data-whole-boxes'),String(Object.values(layerCounts).reduce((a,b)=>a+b,0)));
+  await page.locator('#count').selectOption('1');await page.locator('#search').fill('');await setLayers([5]);
+  await page.locator('#random').click();await ready();
+  assert.equal(await page.evaluate(ids=>{const catalogue=JSON.parse(document.getElementById('dataset').textContent).catalogue;return ids.every(id=>catalogue.find(row=>row.id===id).layers.includes(5));},await ids()),true);
+  await page.locator('#layerAll').click();await ready();
+  report.checks.push('single-layer and arbitrary layer combinations filter whole-page targets and the sampling pool');
   await page.locator('#search').fill(mixed);
   await page.locator('#find').click();await ready();assert.deepEqual(await ids(),[mixed]);
   assert.equal(await page.locator('.crop.discarded').count()>0,true);

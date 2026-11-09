@@ -94,6 +94,21 @@ class OfflineTests(unittest.TestCase):
             for target in crop['targets']:
                 self.assertEqual(target['bbox'][1]+offset, 1300)
 
+    def test_tall_target_crossing_cuts_is_a_partial_positive_in_every_crop(self):
+        nodes, _, _ = normalize(source([node('p', [0, 0, 390, 8000], struct='block'),
+                                        node('x', [0, 1000, 100, 4000], 'p')]), 'page/mobile')
+        crops, missing = crop_views('page/mobile', 390, 8000, nodes[1:], [1400, 2800, 4200, 5600, 6800], self.config['slicing'])
+        self.assertFalse(missing)
+        targets = [target for crop in crops for target in crop['targets']]
+        self.assertTrue(targets)
+        self.assertTrue(all(target['geometric_visibility'] == 'partial' for target in targets))
+        self.assertTrue(all(target['detection_eligible'] for target in targets))
+        for crop in crops:
+            height = crop['crop_bbox'][3]-crop['crop_bbox'][1]
+            for target in crop['targets']:
+                self.assertGreaterEqual(target['bbox'][1], 0)
+                self.assertLessEqual(target['bbox'][3], height)
+
     def test_capacity_conflict_never_truncates_targets(self):
         nodes, _, _ = normalize(source([node(str(i), [0, 1, 40, 30]) for i in range(385)]), 'p/mobile')
         with self.assertRaisesRegex(ValueError, 'dense_capacity_conflict'):

@@ -79,13 +79,15 @@ def plan_cuts(width, height, targets, separators, policy):
 def crop_views(observation_id, width, height, targets, cuts, policy, source_ignores=()):
     """Create local crop views without editing global boxes, semantics or parent relationships.
 
-    Fragments are ignore regions, never new complete-object positives. Full targets may
-    repeat across context crops; owner_core_index is a deterministic global reference.
+    A target cut by the crop boundary stays a positive with its visible local box.
+    Full targets may repeat across context crops; owner_core_index is a deterministic
+    global reference.
     """
     bounds = [0, *cuts, height]
     crops = []
     global_bounds = [0, 0, width, height]
     seen_full = set()
+    seen_positive = set()
     for pos, (top, bottom) in enumerate(zip(bounds, bounds[1:])):
         crop_top, crop_bottom = top, bottom
         if cuts:
@@ -122,8 +124,9 @@ def crop_views(observation_id, width, height, targets, cuts, policy, source_igno
                 positives.append(reference)
                 seen_full.add(node['global_node_id'])
             else:
-                reference.update(reason='boundary_fragment', detection_eligible=False)
-                ignores.append(reference)
+                reference.update(reason='boundary_fragment', detection_eligible=True)
+                positives.append(reference)
+            seen_positive.add(node['global_node_id'])
         for source_ignore in source_ignores:
             clipped = intersection(source_ignore['bbox'], crop_box)
             if area(clipped) > 0:
@@ -139,12 +142,12 @@ def crop_views(observation_id, width, height, targets, cuts, policy, source_igno
                       'local_to_global': {'scale': [1, 1], 'translation': [0, crop_top]},
                       'targets': positives, 'ignore_regions': ignores,
                       'status': 'accepted' if not reasons else 'review', 'reason_codes': reasons})
-    missing = sorted({n['global_node_id'] for n in targets} - seen_full)
+    missing = sorted({n['global_node_id'] for n in targets} - seen_positive)
     return crops, missing
 
 
 def supervision_qualification(targets, crops, missing, partition, policy):
-    """Grade cut pseudo-labels by actual full-target coverage, allowing bounded component-only loss."""
+    """Grade cut pseudo-labels by actual target coverage, allowing bounded component-only loss."""
     index = {n['global_node_id']: n for n in targets}
     critical_missing = [key for key in missing if critical_target(index[key])]
     component_missing = [key for key in missing if key not in critical_missing]

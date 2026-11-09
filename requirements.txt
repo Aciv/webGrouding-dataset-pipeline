@@ -1,0 +1,6 @@
+# Offline dataset pipeline (Python 3.11+; tested with Python 3.14.4).
+# Collection/review also needs the Node dependencies in package.json.
+# Tested versions: numpy 2.5.4, Pillow 13.0.0, PyYAML 6.0.3.
+numpy>=1.26,<3
+Pillow>=10,<14
+PyYAML>=6.0,<7

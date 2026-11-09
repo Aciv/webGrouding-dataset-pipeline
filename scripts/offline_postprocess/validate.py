@@ -2,7 +2,7 @@
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import json
-from .domain import graph_depths, contains
+from .domain import graph_depths, contains, area, intersection
 from .cleanup import critical_target
 from .infrastructure import read_jsonl, sha256_file, write_json
 
@@ -73,10 +73,16 @@ def validate_dataset(root, workers=12):
                         errors.append('capacity_overflow')
                     for target in crop['targets']:
                         node = index[target['global_node_id']]
-                        expected = [node['bbox'][0], node['bbox'][1]-box[1], node['bbox'][2], node['bbox'][3]-box[1]]
+                        if target.get('geometric_visibility', 'complete') == 'complete':
+                            expected = [node['bbox'][0], node['bbox'][1]-box[1], node['bbox'][2], node['bbox'][3]-box[1]]
+                            valid_positive = node['detection_eligible'] and contains(box, node['bbox'])
+                        else:
+                            clipped = intersection(node['bbox'], box)
+                            expected = [clipped[0], clipped[1]-box[1], clipped[2], clipped[3]-box[1]]
+                            valid_positive = node['detection_eligible'] and area(clipped) > 0
                         if any(abs(a-b) > 1e-8 for a, b in zip(expected, target['bbox'])):
                             errors.append('local_global_transform_mismatch')
-                        if not node['detection_eligible'] or not contains(box, node['bbox']):
+                        if not valid_positive:
                             errors.append('invalid_positive')
                         parent = node.get('parent_id')
                         expected_parent = f'{observation_id}/{parent}' if parent else None
