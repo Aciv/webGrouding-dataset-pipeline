@@ -24,6 +24,16 @@ def width_bucket(width, edges):
     return next((str(edge) for edge in edges if width <= edge), f'>{edges[-1]}')
 
 
+def hundred_px_histogram(values):
+    """Count pixel heights in 100px bins aligned to multiples of 100; empty bins are omitted.
+
+    Inputs are CSS-pixel heights (crop-local or original-image space as supplied by the
+    caller); this only summarizes published values and never changes crop geometry.
+    """
+    counts = Counter(int(value//100)*100 for value in values)
+    return {f'[{start},{start+100})': counts[start] for start in sorted(counts)}
+
+
 def iou_statistics(boxes, edges):
     """Count all unordered within-sample pairs and per-box maximum IoU using <=128 by N blocks.
 
@@ -201,6 +211,7 @@ def compute_statistics(root, workers=12):
                'source_classes_on_accepted_observations': dict(source_classes), 'cleaned_detection_classes': dict(final_classes),
                'input_height_distribution': distribution(heights, [900, 1801, 2701, 5000, 8000]),
                'crop_height_distribution': distribution(crop_heights, [900, 1200, 1500, 1801, 2701]),
+               'crop_height_histogram_100px': hundred_px_histogram(crop_heights),
                'crops_per_observation': dict(Counter(crop_counts)), 'cuts_per_processed_observation': dict(Counter(cut_counts)),
                'boxes_per_crop': distribution(target_counts, [1, 10, 50, 100, 200, 300, 385]),
                'width_buckets': buckets,
@@ -236,7 +247,9 @@ def compute_statistics(root, workers=12):
                   '## 宽度分桶', '', '| 宽度上限 | 裁片 | 框出现次数 | 非零 IoU 框对 | 全部框对 | 非零比例 |', '|---|---:|---:|---:|---:|---:|'])
     lines.extend(f"| {bucket} | {r['crops']} | {r['boxes']} | {r['nonzero_pairs']} | {r['pair_count']} | {r['nonzero_pair_ratio']:.4%} |" for bucket, r in buckets.items())
     lines.extend(['', 'IoU 是同一裁片内标签框之间的几何重叠，不是检测准确率。完整分布见 summary.json 和 iou-buckets.csv。', '',
-                  f'裁片高度分布：`{summary["crop_height_distribution"]}`', '',
-                  '所有标签仍是规则生成候选；重要对象误删数未经人工确认，仅报告排除候选。'])
+                  f'裁片高度粗分桶：`{summary["crop_height_distribution"]}`', '',
+                  '## 裁片高度（100px 分桶）', '', '| 高度区间 | 裁片 |', '|---|---:|'])
+    lines.extend(f'| {interval} | {count} |' for interval, count in summary['crop_height_histogram_100px'].items())
+    lines.extend(['', '所有标签仍是规则生成候选；重要对象误删数未经人工确认，仅报告排除候选。'])
     (reports/'summary.md').write_text('\n'.join(lines)+'\n', encoding='utf-8')
     return summary

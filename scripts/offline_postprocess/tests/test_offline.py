@@ -10,7 +10,8 @@ from scripts.offline_postprocess.domain import normalize, graph_depths
 from scripts.offline_postprocess.cleanup import clean_nodes
 from scripts.offline_postprocess.slicing import plan_cuts, crop_views
 from scripts.offline_postprocess.application import run_dataset
-from scripts.offline_postprocess.statistics import iou_statistics, compute_statistics
+from scripts.offline_postprocess.statistics import iou_statistics, compute_statistics, hundred_px_histogram
+from scripts.offline_postprocess.labels import correct_pseudo_icon_label
 
 
 def node(key, box, parent=None, struct='text', subtype='text', **extra):
@@ -78,6 +79,24 @@ class OfflineTests(unittest.TestCase):
                     self.assertGreaterEqual(crop['core_bbox'][3]-crop['core_bbox'][1], 900)
                     self.assertLessEqual(crop['crop_bbox'][3]-crop['crop_bbox'][1], 1800)
                 self.assertTrue(all(a['core_bbox'][3] == b['core_bbox'][1] for a, b in zip(crops, crops[1:])))
+
+    def test_large_pseudo_icon_is_corrected_to_block_with_provenance(self):
+        large = {'struct':'graphic', 'subtype':'icon', 'kind':'element', 'bbox':[0,0,300,200],
+                 'structure_reasons':['pseudo_content'], 'reasons':['pseudo_content']}
+        self.assertTrue(correct_pseudo_icon_label(large))
+        self.assertEqual((large['struct'], large['subtype']), ('block', 'visual_block'))
+        self.assertEqual(large['label_correction']['from']['struct'], 'graphic')
+        self.assertIn('large_pseudo_content_block', large['structure_reasons'])
+        small = {'struct':'graphic', 'subtype':'icon', 'kind':'element', 'bbox':[0,0,16,16],
+                 'structure_reasons':['pseudo_content']}
+        self.assertFalse(correct_pseudo_icon_label(small))
+        line = {'struct':'graphic', 'subtype':'icon', 'kind':'element', 'bbox':[0,0,300,1],
+                'structure_reasons':['pseudo_content']}
+        self.assertFalse(correct_pseudo_icon_label(line))
+
+    def test_crop_height_histogram_uses_fixed_100px_bins(self):
+        self.assertEqual(hundred_px_histogram([899, 900, 999, 1000, 1800]),
+                         {'[800,900)': 1, '[900,1000)': 2, '[1000,1100)': 1, '[1800,1900)': 1})
 
     def test_crop_preserves_outside_parent_and_fragments(self):
         nodes, _, _ = normalize(source([node('p', [0, 0, 390, 8000], struct='block'),

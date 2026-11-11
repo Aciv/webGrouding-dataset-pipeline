@@ -42,6 +42,15 @@ const nodes = [
   node("cell", "td", "row", { ownText: "Cell value" }),
   node("list", "ul", "root"), node("item", "li", "list", { ownText: "List text" }),
   node("painted-block", "x-dashboard-card", "root", { style: { backgroundColor: "white" } }),
+  node("pseudo-icon", "i", "root", { bbox: { x: 10, y: 10, width: 16, height: 16 },
+    captureBbox: { x: 10, y: 10, width: 16, height: 16 }, pseudo: { before: "url(icon.svg)", after: "none" } }),
+  node("pseudo-block", "div", "root", { bbox: { x: 0, y: 0, width: 300, height: 200 },
+    captureBbox: { x: 0, y: 0, width: 300, height: 200 },
+    style: { display: "block", backgroundColor: "white" }, pseudo: { before: "url(block-bg.svg)", after: "none" } }),
+  node("pseudo-block-unpainted", "div", "root", { bbox: { x: 0, y: 0, width: 300, height: 200 },
+    captureBbox: { x: 0, y: 0, width: 300, height: 200 }, pseudo: { before: "url(detail.svg)", after: "none" } }),
+  node("pseudo-divider", "div", "root", { bbox: { x: 0, y: 0, width: 160, height: 1 },
+    captureBbox: { x: 0, y: 0, width: 160, height: 1 }, pseudo: { before: "url(line.svg)", after: "none" } }),
   node("wrapper", "div", "root"),
   node("unknown", "custom-control", "root", { interactiveHint: true }),
   node("embed", "iframe", "root"),
@@ -67,6 +76,10 @@ const label = (id: string) => classifyStructure(nodes.find(n => n.nodeId === id)
 for (const [id, struct] of [["paragraph", "text"], ["image", "image"], ["svg", "graphic"],
   ["video", "media"], ["button", "control"], ["table", "table"], ["list", "list"],
   ["root", "region"], ["painted-block", "block"]]) assert.equal(label(id)?.struct, struct);
+assert.equal(label("pseudo-icon")?.struct, "graphic", "Icon-scale pseudo content remains a graphic");
+assert.equal(label("pseudo-block")?.struct, "block", "Large painted pseudo containers must stay blocks");
+assert.equal(label("pseudo-block-unpainted")?.struct, "block", "Large unpainted pseudo containers must not become icons");
+assert.equal(label("pseudo-divider"), null, "Thin pseudo dividers are not graphic icons");
 assert.equal(label("wrapper"), null, "Empty layout wrappers cannot become generic block positives");
 assert.equal(label("unknown")?.struct, "unknown");
 assert.equal(label("unknown")?.disposition, "review");

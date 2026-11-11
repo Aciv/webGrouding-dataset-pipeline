@@ -29,7 +29,7 @@ python3 scripts/pipeline/cli.py run \
 | `filter` | 原始质量、范围、像素预筛；不清框、不切片 |
 | `postprocess` | 清框、分组、切片候选；不执行裁片后筛，不发布 trainable 数据 |
 | `final-filter` | 裁片后筛、统计、独立校验和最终索引 |
-| `layer-filter` | 融合与切片后只保留真实L1–L5，删除深层节点和裁片引用，不提升层级 |
+| `layer-filter` | 融合与切片后保留L1–L5；L6+ 由大框吸附邻近小框，未被L5覆盖的 owner 补入L5，其余移除 |
 | `detail-filter` | 按目标框并集覆盖率标记细节训练资格，不改变视口质量或整页切线监督 |
 | `prepare-pack` | 通过视口的独立 PNG + 精简 JSON、URL 和打包索引 |
 | `pack` | tar.gz 分片、metadata.jsonl 和 manifest.json |
@@ -41,6 +41,57 @@ python3 scripts/pipeline/cli.py run \
 变化后自动选择 `-2` 等新目录，已有成品不覆盖。可用 `--prepare-output`、`--pack-output` 指定。
 当前组件引擎接收一个输入根，筛选参数使用 YAML；旧 VLM/多输入模式须显式 `--engine legacy`。
 `dataset` 支持这七个停止点，默认停在 `detail-filter`，得到已限L5并重算细节资格的最终索引。`final-filter` 是未截层的生成检查点，不可直接当成最终训练标注。
+
+### L6+ 吸附补入 L5
+
+`layer-filter` 不再无条件删除 depth≥5。每个视口先在融合后的真实树上取 L6+ 检测目标：
+面积≥2500px² 且两边≥48px 的大框作为 owner，吸附同一 L4 祖先下、间隙≤24px
+且面积不超过 owner 25% 的小框；owner 取吸附后外接框，再与现有 L5 目标比较，
+覆盖≥95% 的跳过，未覆盖的补入 L5。被吸附小框不再单独成为训练目标。
+补入 owner 重新挂到最近的 L4 祖先，保留真实 `derived_depth` 记录在
+`promoted_from_depth`，并写入 `promotion_rule`、`owner_bbox`、`absorbed_node_ids`。
+未形成吸附组的 L6+ 仍按原规则移除；切片、质量、detail-filter、校验和打包不变。
+阈值为显式规则候选，不是人工真值。
+
+### V6 核心裁片导出
+
+```bash
+python3 scripts/pipeline/cli.py export-v6 \
+  --index <detail-selection>/index-final.json \
+  --output outputs/v6-dataset --workers 8
+```
+
+V6 把每个裁片直接按 `core_bbox` 高度从原图裁好，不再保留整页截图：
+
+```text
+pages/desktop/<page_id>_<crop_order>.png
+pages/mobile/<page_id>_<crop_order>.png
+pages/tablet/<page_id>_<crop_order>.png
+```
+
+每个 PNG 旁边有同名 JSON，`coordinate_space=core_crop_local_pixels`；`targets` 和
+`ignore_regions` 沿用 V5 标签，只做从 `crop_bbox` 局部到 core 局部的坐标平移与裁剪，
+跨 core 边界的目标标记 `geometric_visibility=partial`。JSON 不记录上下文
+`crop_bbox`，只记录 `core_bbox`、core 宽高和原图尺寸；core 裁片互不重叠，避免
+相邻裁片重复内容。`detail_training_eligible/discarded` 仍是 V5 的裁片决策
+（`crop_bbox` 覆盖率），JSON 中标注了决策依据；整页 `split_label` 和最终层投影策略
+一并保留。`crops-index.json` 列出所有图片/JSON 及 SHA-256，`manifest.json`
+汇总数量和视口分布；`reports/statistics.json` / `.md` 另给出 core 高度 100px 分桶、
+视口分布、目标数、partial/ignore 数。V6 只导出 accepted 视口的 accepted 裁片；不改变
+detail-filter、quality 或 split 记录。`export-v6` 是独立导出；`prepare-pack`
+仍输出 `gui_component_pack_input_v1` 供现有 `pack` 使用。
+
+V6 打包使用独立命令，按页面分组生成 tar.gz 分片：
+
+```bash
+python3 scripts/pipeline/cli.py pack-v6 \
+  --input outputs/v6-dataset \
+  --output outputs/v6-dataset-pack --chunk-size-mb 1024
+```
+
+输出 `data/train-NNNNN.tar.gz`、`metadata.jsonl`（每个裁片一行，含 URL、成员路径、
+SHA-256、detail 标记）和 `manifest.json`（分片大小、哈希、裁片数）。分片保持
+`pages/<viewport>/<page_id>_<crop_order>.png|.json` 成员路径；不改变 V1 `pack`。
 
 ### 细节裁片训练选择
 

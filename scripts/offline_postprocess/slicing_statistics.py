@@ -7,6 +7,7 @@ import numpy as np
 from .cleanup import critical_target
 from .domain import area, intersection, contains
 from .infrastructure import read_jsonl, write_json
+from .statistics import hundred_px_histogram
 
 
 def rectangle_union_area(boxes):
@@ -53,6 +54,7 @@ def compute_slicing_statistics(root, baseline=None):
               'cut_clearance_px', 'cut_spacing_px', 'crops_per_observation',
               'long_core_height', 'long_crop_height', 'whole_image_height', 'local_region_height']}
     observation_rows, crop_rows, cut_rows, problem_rows = [], [], [], []
+    published_crop_heights, published_long_crop_heights = [], []
     for q in read_jsonl(root/'quality'/'index.jsonl'):
         folder = root/'observations'/q['observation_id']
         result = json.loads((folder/'result.json').read_text())
@@ -139,6 +141,9 @@ def compute_slicing_statistics(root, baseline=None):
                 counts['adjacent_overlap_at_least_900px'] += overlap >= 900
             if crop['status'] != 'accepted':
                 continue
+            published_crop_heights.append(h)
+            if cuts:
+                published_long_crop_heights.append(h)
             if len(crop['targets']) > policy['max_targets']:
                 obs_errors.append('target_capacity_violation')
             occurrences += len(crop['targets'])
@@ -223,7 +228,9 @@ def compute_slicing_statistics(root, baseline=None):
             totals[name] += 1
         return dict(totals)
     summary['height_bins'] = {'long_actual_crops': buckets(values['long_crop_height'], [900, 1200, 1500, 1801]),
-                             'whole_images': buckets(values['whole_image_height'], [900, 1801, 2701])}
+                             'whole_images': buckets(values['whole_image_height'], [900, 1801, 2701]),
+                             'published_crops_100px': hundred_px_histogram(published_crop_heights),
+                             'published_long_crops_100px': hundred_px_histogram(published_long_crop_heights)}
     summary['overlap_bins_px'] = buckets(values['adjacent_overlap_px'], [1, 96, 192, 384, 900])
     summary['ignore_coverage_bins'] = buckets(values['ignore_union_ratio'], [.000000001, .1, .25, .5, 1.000000001])
     summary['crop_count_per_observation'] = dict(Counter(values['crops_per_observation']))
@@ -294,6 +301,8 @@ def compute_slicing_statistics(root, baseline=None):
         text.append(f'| {key} | {d["min"]} | {d["p50"]} | {d["p90"]} | {d["p99"]} | {d["max"]} |')
     text.extend(['', '核心线穿过对象不等于目标丢失：实际裁图可以通过上下文保留完整目标。包装框丢失与内容目标丢失分别报告。', '',
                  f'长图实际裁片高度数量：`{summary["height_bins"]["long_actual_crops"]}`', '',
+                 f'已发布裁片高度（100px 分桶）：`{summary["height_bins"]["published_crops_100px"]}`', '',
+                 f'已发布长图裁片高度（100px 分桶）：`{summary["height_bins"]["published_long_crops_100px"]}`', '',
                  f'无需切分整图高度数量：`{summary["height_bins"]["whole_images"]}`', '',
                  f'相邻裁图重叠高度数量：`{summary["overlap_bins_px"]}`', '',
                  'ignore与正样本几何重叠需要下游损失实现正样本优先。低信息警告不是视觉错误真值。', '',

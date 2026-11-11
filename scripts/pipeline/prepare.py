@@ -12,7 +12,9 @@ from scripts.webdataset.provenance import read_provenance, sample_provenance
 CONTRACT = 'gui_component_pack_input_v1'
 NODE_FIELDS = ('global_node_id', 'global_parent_id', 'node_id', 'parent_id',
                'layer', 'derived_depth', 'bbox', 'struct', 'subtype', 'kind', 'semantic_role',
-               'text_role', 'detection_eligible', 'pixel_visibility', 'occlusion')
+               'text_role', 'detection_eligible', 'pixel_visibility', 'occlusion',
+               'promoted', 'promotion_rule', 'promoted_from_depth', 'original_parent_id',
+               'owner_bbox', 'absorbed_node_ids', 'absorbed_bboxes', 'label_correction')
 CROP_FIELDS = ('crop_id', 'core_bbox', 'crop_bbox', 'local_to_global', 'targets', 'ignore_regions',
                'target_union_coverage', 'detail_training_eligible', 'detail_training_discarded',
                'detail_training_reason_codes', 'box_pixel_evidence', 'crop_pixel_valid')
@@ -117,7 +119,7 @@ def prepare_pack_input(index_path, output, workers=8, resume=False):
         graph = json.loads(graph_path.read_text())
         depths = graph_depths(graph['nodes'])
         if any(depth>=5 for depth in depths.values()) or any(n.get('layer')!=depths[n['node_id']] for n in graph['nodes']):
-            raise ValueError('Final export requires true L1-L5 nodes: '+oid)
+            raise ValueError('Final export requires published L1-L5 nodes: '+oid)
         relative = Path('pages')/oid
         directory = output/relative
         directory.mkdir(parents=True, exist_ok=True)

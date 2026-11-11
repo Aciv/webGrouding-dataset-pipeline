@@ -145,8 +145,11 @@ def _select_layer_output(base, final_path):
             free=free or candidate
             continue
         path=candidate/'index-final.json'
-        if path.is_file() and json.loads(path.read_text()).get('final_layer_projection',{}).get('source_index_sha256')==digest:
-            return candidate
+        if path.is_file():
+            projection=json.loads(path.read_text()).get('final_layer_projection',{})
+            if (projection.get('source_index_sha256')==digest
+                    and projection.get('rule_version')=='final_component_layers_l6_backfill_v1'):
+                return candidate
     if free is None:raise ValueError('No free final-layer output; pass --layer-output')
     return free
 
@@ -185,6 +188,18 @@ def command_prepare(args):
     """Export accepted component pages as portable image/URL/compact-label packing input."""
     from pipeline.prepare import prepare_pack_input
     emit(prepare_pack_input(args.index, args.output, args.workers, resume=args.resume))
+
+
+def command_export_v6(args):
+    """Export V6 core-height crop PNGs and core-local sidecar JSON grouped by viewport."""
+    from pipeline.prepare_v6 import export_core_crops_v6
+    emit(export_core_crops_v6(args.index, args.output, args.workers, resume=args.resume))
+
+
+def command_pack_v6(args):
+    """Package a V6 core-crop export into tar.gz shards and per-crop metadata."""
+    from pipeline.pack_v6 import pack_v6_export
+    emit(pack_v6_export(args.input, args.output, args.chunk_size_mb, resume=args.resume))
 
 
 def command_filter(args):
@@ -486,6 +501,20 @@ def build_parser():
     prepare.add_argument('--workers', type=int, default=8)
     prepare.add_argument('--resume', action='store_true')
     prepare.set_defaults(func=command_prepare)
+
+    v6 = subparsers.add_parser('export-v6', help='Export core-height crop PNGs and core-local JSON grouped by viewport')
+    v6.add_argument('--index', required=True, type=Path)
+    v6.add_argument('--output', required=True, type=Path)
+    v6.add_argument('--workers', type=int, default=8)
+    v6.add_argument('--resume', action='store_true')
+    v6.set_defaults(func=command_export_v6)
+
+    pack_v6 = subparsers.add_parser('pack-v6', help='Package a V6 core-crop export into tar.gz shards')
+    pack_v6.add_argument('--input', required=True, type=Path)
+    pack_v6.add_argument('--output', required=True, type=Path)
+    pack_v6.add_argument('--chunk-size-mb', type=float, default=1024)
+    pack_v6.add_argument('--resume', action='store_true')
+    pack_v6.set_defaults(func=command_pack_v6)
 
     filtering = subparsers.add_parser("filter", help="Legacy geometry-only index filter; current staged pipeline: dataset")
     source = filtering.add_mutually_exclusive_group(required=True)

@@ -6,7 +6,7 @@ import unittest
 from PIL import Image, ImageDraw
 from scripts.offline_postprocess.tests.test_offline import source, node
 from scripts.offline_postprocess.infrastructure import sha256_file
-from scripts.pipeline.layer_projection import truncate_graph, truncate_crop
+from scripts.pipeline.layer_projection import PROMOTION_POLICY, truncate_graph, truncate_crop
 from scripts.pipeline.components import run_component_pipeline
 from scripts.pipeline.prepare import prepare_pack_input
 
@@ -32,6 +32,51 @@ class LayerProjectionTests(unittest.TestCase):
         self.assertEqual(final['crop_bbox'],crop['crop_bbox'])
         self.assertEqual(len(final['ignore_regions']),1)
         with self.assertRaises(ValueError):truncate_graph({'nodes':nodes},6)
+
+    def test_l6_large_box_adsorbs_nearby_small_details_and_backfills_l5(self):
+        def graph_box(key, parent, box, detection=True):
+            return {'node_id':key, 'global_node_id':f'p/mobile/{key}', 'parent_id':parent,
+                    'bbox':box, 'detection_eligible':detection, 'struct':'block',
+                    'subtype':'visual_block', 'layer':99}
+        nodes = [graph_box('n0', None, [0,0,1000,1000]),
+                 graph_box('n1', 'n0', [0,0,1000,1000]),
+                 graph_box('n2', 'n1', [0,0,1000,1000]),
+                 graph_box('n3', 'n2', [0,0,1000,1000]),
+                 graph_box('n4', 'n3', [0,0,50,50]),
+                 graph_box('owner', 'n4', [100,100,400,400]),
+                 graph_box('small1', 'owner', [410,100,450,140]),
+                 graph_box('small2', 'owner', [120,120,160,160]),
+                 graph_box('small3', 'small1', [420,110,445,135]),
+                 graph_box('large_no_small', 'n4', [600,600,800,800]),
+                 graph_box('small_alone', 'n4', [900,900,930,930])]
+        graph, counts = truncate_graph({'nodes':nodes}, promotion=PROMOTION_POLICY)
+        self.assertEqual([n['node_id'] for n in graph['nodes']], ['n0','n1','n2','n3','n4','owner'])
+        promoted = graph['nodes'][-1]
+        self.assertTrue(promoted['promoted'])
+        self.assertEqual(promoted['parent_id'], 'n3')
+        self.assertEqual((promoted['layer'], promoted['derived_depth']), (4,4))
+        self.assertEqual(promoted['bbox'], [100,100,450,400])
+        self.assertEqual(promoted['absorbed_node_ids'], ['p/mobile/small1','p/mobile/small2','p/mobile/small3'])
+        self.assertEqual((counts['l6_promoted_owners'], counts['l6_absorbed_nodes']), (1,3))
+        self.assertEqual(counts.get('l6_skipped_covered_by_l5', 0), 0)
+        crop = {'crop_bbox':[0,0,1000,1000], 'core_bbox':[0,0,1000,1000],
+                'targets':[{'global_node_id':n['global_node_id'], 'bbox':n['bbox']} for n in nodes],
+                'ignore_regions':[]}
+        final = truncate_crop(crop, graph)
+        self.assertEqual([t['global_node_id'] for t in final['targets']],
+                         ['p/mobile/n0','p/mobile/n1','p/mobile/n2','p/mobile/n3','p/mobile/n4','p/mobile/owner'])
+        owner = final['targets'][-1]
+        self.assertEqual(owner['bbox'], [100,100,450,400])
+        self.assertEqual(owner['global_parent_id'], 'p/mobile/n3')
+        self.assertEqual(owner['layer'], 4)
+        self.assertEqual(owner['geometric_visibility'], 'complete')
+
+        # An existing L5 target covering the same region suppresses the duplicate owner.
+        covered = [dict(n) for n in nodes]
+        covered[4] = graph_box('n4', 'n3', [90,90,470,410])
+        graph, counts = truncate_graph({'nodes':covered}, promotion=PROMOTION_POLICY)
+        self.assertNotIn('owner', [n['node_id'] for n in graph['nodes']])
+        self.assertEqual(counts['l6_skipped_covered_by_l5'], 1)
 
     def test_standalone_export_cannot_bypass_depth_limit_or_reuse_old_coverage(self):
         with tempfile.TemporaryDirectory() as temp:

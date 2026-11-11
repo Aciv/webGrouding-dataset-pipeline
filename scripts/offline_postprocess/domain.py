@@ -1,6 +1,7 @@
 """Pure geometry and source-graph contracts; all internal boxes are CSS-pixel xyxy."""
 import math
 from copy import deepcopy
+from .labels import correct_pseudo_icon_label
 
 VERSION = 'component_slices_v5'
 
@@ -81,6 +82,8 @@ def normalize(source, observation_id):
                     detection_eligible=original.get('disposition') == 'detection',
                     source_detection_eligible=original.get('disposition') == 'detection',
                     supervision_reason='source_detection' if original.get('disposition') == 'detection' else 'source_structure_only')
+        if correct_pseudo_icon_label(node) and node['detection_eligible']:
+            node['supervision_reason'] = 'source_detection_corrected_pseudo_block'
         node.setdefault('source_node_ids', [node['node_id']])
         # Missing pixel visibility/occlusion evidence stays unknown, regardless of ARIA facts.
         node['pixel_visibility'] = original.get('pixel_visibility', 'unknown')

@@ -49,7 +49,7 @@ function badge(text,cls=''){return element('span',text,'badge '+cls);}
 function message(text){$('message').textContent=text;}
 function layerTable(){
  const stats=bundle.layer_statistics;if(!stats){$('layerStatsContent').textContent='此版本尚未生成逐层统计。';return;}
- const content=$('layerStatsContent');content.append(element('p','仅统计质量通过的视口。L1 = derived_depth 0，按融合后的真实parent链保留最终L1–L5；更深节点已从最终标注移除，不提升层级。去重框数排除上下文重复，出现次数保留重复。整页与裁片视图可用工具栏“层级组合”单层或任意组合过滤。','muted'));
+ const content=$('layerStatsContent');content.append(element('p','仅统计质量通过的视口。L1 = derived_depth 0，L5包含真实depth-4节点与L6+吸附后补入的owner；未吸附深层节点已移除。去重框数排除上下文重复，出现次数保留重复。整页与裁片视图可用工具栏“层级组合”单层或任意组合过滤。','muted'));
  const table=element('table');table.style.cssText='border-collapse:collapse;min-width:850px;font-size:14px';
  const columns=[['layer','当前层'],['global_detection_targets','整页检测去重框'],['candidate_unique_targets','裁片候选去重框'],['detail_training_unique_targets','细节训练去重框'],['detail_training_occurrences','细节训练出现次数'],['withheld_only_by_detail_selection','仅因裁片筛选退出的去重框']];
  const header=element('tr');for(const [,label] of columns){const th=element('th',label);th.style.cssText='padding:8px 12px;border:1px solid #ccd5df;background:#eaf0f6;text-align:right';header.append(th);}table.append(header);

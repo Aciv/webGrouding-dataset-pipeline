@@ -4,16 +4,21 @@ import { proposal, rejection } from "../decision.js";
 
 /** Block requires visible-content evidence; unknown and empty wrappers are separate outcomes. */
 export const fallbackRule: StructureRule = (node, context) => {
-  const facts = context.descendants(node), paint = paintEvidence(node);
-  if (!facts.children && hasPseudoContent(node) && !node.ownText)
+  const facts = context.descendants(node), paint = paintEvidence(node), pseudo = hasPseudoContent(node);
+  // Pseudo content proves an icon only at icon scale. A large painted/pseudo container
+  // must remain a block instead of being mislabeled as graphic/icon.
+  const iconSized = node.bbox.width >= 4 && node.bbox.height >= 4 &&
+    node.bbox.width <= 64 && node.bbox.height <= 64;
+  if (!facts.children && pseudo && iconSized && !node.ownText)
     return proposal(node, "graphic", "icon", "element", 65, true, "pseudo_content");
   if (!facts.children && hasBackgroundImage(node))
     return proposal(node, "image", "background_image", "element", 65, true, "background_image_leaf");
   if (node.ownText && !facts.children)
     return proposal(node, "text", "text", "element", 60, true, "direct_text_leaf", "detection", { text_role: "body" });
-  if (paint.length && node.bbox.width >= 16 && node.bbox.height >= 12)
+  if ((paint.length || (pseudo && !iconSized)) && node.bbox.width >= 16 && node.bbox.height >= 12)
     return proposal(node, "block", "visual_block", facts.children ? "group" : "element", 60,
-      !facts.children, "independent_painted_block", "detection", { structure_reasons: paint });
+      !facts.children, paint.length ? "independent_painted_block" : "independent_pseudo_block",
+      "detection", { structure_reasons: paint.length ? paint : ["pseudo_content"] });
   if (/flex|grid/.test(node.style.display || "") && facts.children >= 2 &&
       ((node.style.gap || "").split(/\s+/).some(value => parseFloat(value) > 0) ||
        (node.style.padding || "").split(/\s+/).some(value => parseFloat(value) > 0)))

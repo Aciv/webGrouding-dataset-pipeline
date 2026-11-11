@@ -43,7 +43,7 @@ node scripts/offline_postprocess/tests/test_dataset_viewer_picker.mjs
 
 统一HTML顶部展开“每个layer的统计数据”，可看当前层的整页去重框、细节训练去重框、
 裁片出现次数、低覆盖筛选独占退出框数；原始source_layer分布另列。
-最终L1=derived_depth 0，按融合后的实际parent链只保留L1–L5，不提升深层对象，也不剥掉inactive结构祖先。原始层级仅供来源审计。
+最终L1=derived_depth 0；L5包含真实depth 4节点及L6+大框吸附后未被现有L5覆盖的owner。被吸附的小框不再单独发布，原始层级仅供来源审计。
 
 ```bash
 python3 -m scripts.offline_postprocess.cli layer-stats \
@@ -56,6 +56,9 @@ pipeline在detail-filter之后自动补齐此统计；生成查看器时也会�
 
 当前规则版本为 `component_slices_v5`。本入口替代旧 VLM／五层后处理。旧 v13 后处理结果已废弃，作为输入时明确拒绝。
 原始 DOM 候选标签也不是人工真值；所有输出标记 `rule_generated_unverified`。
+保存的分类器曾把非图标尺寸的 pseudo-content 叶子标成 `graphic/icon`；`labels.py`
+在 xyxy 空间中把宽度≥16、高度≥12 且超过 64px 的候选显式改为 `block/visual_block`，
+保留原标签到 `label_correction`；薄伪元素线不改写，源 hierarchy 不被修改。
 
 v5沿用v4的横向layout严重溢出拦截（2px容差、10%宽度损失、至少5框且占比≥20%）。
 仍按视口独立筛选，不因另一视口失败连带删除正常截图，不按少于10框一刀切。
@@ -118,6 +121,8 @@ H≤2700 保留整图；H>2700 用像素分隔与框布局的全局规划生成�
 - `crops/manifest.jsonl`：accepted 视口的裁图候选；`crops/trainable.jsonl` 仅含可用裁图。
 - `split_labels/manifest.jsonl`：整页最终线候选；`trainable.jsonl` 仅含符合资格的伪标签。
 - `reports/summary.json`、`summary.md`、`observations.csv`、`crops.csv`、`iou-buckets.csv`：可重算统计。
+  已发布裁片高度同时按 100px 分桶：`crop_height_histogram_100px`；
+  `reports/slicing-summary.json` 另有 `height_bins.published_crops_100px` 和 `published_long_crops_100px`。
 
 默认不复制 PNG，按 `source_image` 和 `crop_bbox` 按需裁图；配置
 `slicing.materialize_crops: true` 可生成实体 PNG。全局对象 ID 不做跨视口语义对齐；

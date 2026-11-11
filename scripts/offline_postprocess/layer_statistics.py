@@ -93,7 +93,7 @@ def compute_layer_statistics(index_path, output=None, workers=8):
     report = {'schema':'gui_layer_statistics_v1', 'rule_version':index['rule_version'],
               'source_index_sha256':sha256_file(index_path), 'accepted_observations':len(observations),
               'scope':'Accepted viewports; global object IDs remain viewport-specific',
-              'layer_definition':('L1=derived_depth 0; final true L1-L5 parent depth including inactive ancestors'
+              'layer_definition':('L1=derived_depth 0; L5 includes true depth-4 nodes and selected L6+ adsorption owners'
                                   if index.get('final_layer_projection') else
                                   'L1=derived_depth 0; intermediate full parent depth, not the final L5 export'),
               'source_layer_definition':'Original source_layer, preserved separately; unknown is not inferred',
@@ -111,7 +111,7 @@ def compute_layer_statistics(index_path, output=None, workers=8):
     with (output/'source-layer-statistics.csv').open('w',encoding='utf-8',newline='') as stream:
         writer = csv.DictWriter(stream,fieldnames=['source_layer','display_layer','source_nodes','source_detection_candidates']);writer.writeheader();writer.writerows(original_rows)
     lines = ['# 每层框统计','',
-             ('最终层按真实parent链深度保留L1-L5：L1=derived_depth 0，深层不提升。原始source_layer另列，可能更深。'
+             ('最终层L1-L5：L1=derived_depth 0；L5包含真实depth-4节点与L6+吸附补入owner。原始source_layer另列，可能更深。'
               if index.get('final_layer_projection') else
               '本表是未截断的中间完整图，不是最终L5成品；L1=derived_depth 0，原始source_layer单独列出。'),
              '仅统计质量通过的视口；不同视口的对象不做语义合并。去重框数按global_node_id去除裁片上下文重复；出现次数保留重复。','',
